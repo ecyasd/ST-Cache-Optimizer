@@ -270,7 +270,8 @@ function setEnabled(value) {
     settings().enabled = value;
     save();
     $('#cacheopt_enabled').prop('checked', value);
-    $('#cacheopt_menu_label').text(`⚡ 缓存优化：${value ? '开' : '关'}`);
+    $('#cacheopt_menu_label').text(`缓存优化：${value ? '开' : '关'}`);
+    $('#cacheopt_menu .extensionsMenuExtensionButton').css('opacity', value ? '' : '0.4');
 }
 
 function renderLearned() {
@@ -329,8 +330,10 @@ function renderSettings() {
     $('#cacheopt_last').text(lastRun);
     renderLearned();
 
-    const item = $(`<div id="cacheopt_menu" class="list-group-item flex-container flexGap5" title="开关缓存优化">
-        <div class="fa-solid fa-bolt extensionsMenuExtensionButton"></div><span id="cacheopt_menu_label"></span></div>`);
+    // 魔法棒菜单（左下角）一键开关，结构与酒馆自带的菜单项一致
+    const item = $(`<div id="cacheopt_wand_container" class="extension_container interactable" tabindex="0">
+        <div id="cacheopt_menu" class="list-group-item flex-container flexGap5 interactable" tabindex="0" role="listitem" title="一键开关缓存优化">
+          <div class="fa-solid fa-bolt extensionsMenuExtensionButton"></div><span id="cacheopt_menu_label"></span></div></div>`);
     item.on('click', () => {
         setEnabled(!settings().enabled);
         toastr.info(`缓存优化已${settings().enabled ? '开启' : '关闭'}`, '缓存优化');
