@@ -338,23 +338,36 @@ async function checkStability() {
 // 这里在网络层旁观每次真实发出的请求（不修改、不额外请求），和同一聊天的上一次对比。
 
 const GENERATE_PATH = '/api/backends/chat-completions/generate';
-let lastReal = null;
+const RECENT_LIMIT = 8;
+// 同一聊天最近几次真实请求；扩展的辅助请求（摘要、生图提示词等）也会经过这里，
+// 所以新请求和其中「共同前缀最长」的一次配对，正常对话自然会和正常对话比。
+let recentReal = [];
 
-function describeReal(prev, cur, gapSec) {
-    const msgs = body => (Array.isArray(body.messages) ? body.messages : []).map(m => `[${m.role}]${text(m)}`);
-    const a = msgs(prev.body), b = msgs(cur.body);
+function messageTexts(body) {
+    return (Array.isArray(body.messages) ? body.messages : []).map(m => `[${m.role}]${text(m)}`);
+}
+
+function sharedPrefix(a, b) {
     let k = 0;
     while (k < a.length && k < b.length && a[k] === b[k]) k++;
-    const sameChars = a.slice(0, k).reduce((s, t) => s + t.length + 1, 0);
-    const total = b.reduce((s, t) => s + t.length + 1, 0) || 1;
     let at = 0;
-    if (k < b.length) while (at < (a[k] ?? '').length && a[k][at] === b[k][at]) at++;
-    const around = k < b.length ? b[k].slice(Math.max(0, at - 30), at + 60).replace(/\s+/g, ' ') : '';
+    if (k < a.length && k < b.length) while (at < a[k].length && a[k][at] === b[k][at]) at++;
+    const chars = a.slice(0, k).reduce((s, t) => s + t.length + 1, 0) + at;
+    return { k, at, chars };
+}
+
+function describeReal(prev, cur, gapSec) {
+    const a = prev.texts, b = cur.texts;
+    const { k, at, chars } = sharedPrefix(a, b);
+    const total = b.reduce((s, t) => s + t.length + 1, 0) || 1;
+    const show = s => s.slice(Math.max(0, at - 40), at + 80).replace(/\s+/g, ' ');
     const toolNames = body => JSON.stringify((body.tools ?? []).map(t => t?.function?.name ?? t?.name ?? ''));
     return [
-        `${new Date().toLocaleTimeString()}｜距上一次真实发送 ${gapSec} 秒`,
-        `整条相同的前缀：${(sameChars / total * 100).toFixed(1)}%（前 ${k} 条消息 / 共 ${b.length} 条）`,
-        k < b.length ? `第一处不同：第 ${k + 1} 条（${cur.body.messages[k]?.role}），该条第 ${at} 字附近：${around}` : '两次完全相同',
+        `${new Date().toLocaleTimeString()}｜对比 ${gapSec} 秒前最相似的一次真实请求（${a.length} 条 → ${b.length} 条消息）`,
+        `相同的前缀：${(chars / total * 100).toFixed(1)}%（约 ${chars.toLocaleString()} / ${total.toLocaleString()} 字，前 ${k} 条完全相同）`,
+        k < b.length ? `第一处不同：第 ${k + 1} 条（${cur.body.messages[k]?.role}），该条第 ${at} 字` : '两次完全相同',
+        k < b.length ? `　上次：${show(a[k] ?? '（无）')}` : '',
+        k < b.length ? `　这次：${show(b[k])}` : '',
         toolNames(prev.body) !== toolNames(cur.body) ? '⚠ 两次的工具定义不同（工具名变化会让整轮 0 命中）' : '',
         gapSec > 600 ? '⚠ 间隔超过 10 分钟，缓存可能已过期' : '',
     ].filter(Boolean).join('\n');
@@ -366,14 +379,19 @@ function recordRealRequest(rawBody) {
     if (!body || !Array.isArray(body.messages) || body.type === 'quiet') return;
     const chatId = ctx().getCurrentChatId?.() ?? '';
     const now = Date.now();
-    if (lastReal && lastReal.chatId === chatId) {
-        const report = describeReal(lastReal, { body }, Math.round((now - lastReal.at) / 1000));
+    const cur = { chatId, at: now, body, texts: messageTexts(body) };
+    const candidates = recentReal.filter(r => r.chatId === chatId);
+    if (candidates.length) {
+        const best = candidates
+            .map(r => ({ r, score: sharedPrefix(r.texts, cur.texts).chars }))
+            .sort((x, y) => y.score - x.score)[0].r;
+        const report = describeReal(best, cur, Math.round((now - best.at) / 1000));
         settings().lastRealReport = report;
         save();
         $('#cacheopt_real').text(report);
         console.info('[缓存优化] 真实发送对比\n' + report);
     }
-    lastReal = { chatId, at: now, body };
+    recentReal = [...recentReal.filter(r => r.chatId === chatId), cur].slice(-RECENT_LIMIT);
 }
 
 function watchRealRequests() {
