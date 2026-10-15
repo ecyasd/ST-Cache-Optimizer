@@ -21,12 +21,15 @@ const DEFAULTS = Object.freeze({
     learn: true,
     volatileHeads: ['〔记忆系统私密简报'],
     learnedHeads: [],
-    historyEndHeads: ['</聊天记录>', '</history>', '</chat_history>'],
     keepPatterns: 'output_format|Force_Structured|^<\\/?Format>|jailbreak|破限',
 });
 const WRAP_OPEN = '<当前剧情相关设定>';
 const WRAP_CLOSE = '</当前剧情相关设定>';
 const WRAP_WORLD = '__cache_optimizer__';
+const STATIC_OPEN = '<固定设定>';
+const STATIC_CLOSE = '</固定设定>';
+// 比任何聊天记录都深：插在聊天记录最顶端
+const TOP_DEPTH = 99999;
 const POS = { before: 0, after: 1, anTop: 2, anBottom: 3, atDepth: 4, emTop: 5, emBottom: 6, outlet: 7 };
 const ROLE_SYSTEM = 0;
 const HOIST_ORDER_BASE = 100000;
@@ -83,11 +86,32 @@ function isDynamicEntry(entry) {
     return false;
 }
 
+/** 预设里某个模块（如 worldInfoBefore）是否排在聊天记录之前；找不到时按常见结构（之前）处理 */
+function presetSlotBeforeHistory(identifier) {
+    const orders = ctx().chatCompletionSettings?.prompt_order ?? [];
+    const order = (orders.find(o => o.character_id === 100001) ?? orders[0])?.order ?? [];
+    const index = id => order.findIndex(e => e.identifier === id && e.enabled !== false);
+    const slot = index(identifier), history = index('chatHistory');
+    if (slot < 0 || history < 0) return true;
+    return slot < history;
+}
+
 function routeEntries(lists) {
     const s = settings();
     if (!s.enabled || !s.routeWorldInfo) return;
     const keep = keepRegex();
+    // 有的预设把世界书位置排在聊天记录之后：那里的内容每轮都排在新消息后面，永远命中不了。
+    // 这时固定设定改插到聊天记录最顶端（深度 TOP_DEPTH），不管预设怎么排都在聊天记录之前。
+    const beforeSlotOk = presetSlotBeforeHistory('worldInfoBefore');
+    const afterSlotOk = presetSlotBeforeHistory('worldInfoAfter');
     let moved = 0, template = null, target = null;
+    let topMoved = 0, topTemplate = null, topTarget = null;
+    const toTop = (e, list, order) => {
+        Object.assign(e, { position: POS.atDepth, depth: TOP_DEPTH, role: ROLE_SYSTEM, order });
+        topMoved++;
+        topTemplate ??= e;
+        topTarget ??= list;
+    };
 
     for (const list of lists) {
         if (!Array.isArray(list)) continue;
@@ -104,6 +128,8 @@ function routeEntries(lists) {
                     moved++;
                     template ??= e;
                     target ??= list;
+                } else if (pos === POS.before ? !beforeSlotOk : !afterSlotOk) {
+                    toTop(e, list, (pos === POS.after ? 50000 : 0) + (Number(e.order) || 0));
                 }
             } else if (pos === POS.atDepth && (!e.constant || isDynamicEntry(e))) {
                 // 会变的深度条目统一放到深度 0：深度设得比聊天记录还大时它会落进系统提示，
@@ -114,22 +140,27 @@ function routeEntries(lists) {
                 }
             } else if (s.hoistStatic && e.constant && !isDynamicEntry(e)
                 && (pos === POS.atDepth || pos === POS.anTop || pos === POS.anBottom)) {
-                // 固定规则前移进系统提示；按原深度从深到浅、再按 order 排，保持原先的相对顺序
+                // 固定规则前移到聊天记录之前；按原深度从深到浅、再按 order 排，保持原先的相对顺序
                 const depth = pos === POS.atDepth ? Number(e.depth) || 0 : 0;
-                Object.assign(e, { position: POS.before, order: HOIST_ORDER_BASE + (100 - Math.min(depth, 99)) * 1000 + (Number(e.order) || 0) });
+                const order = HOIST_ORDER_BASE + (100 - Math.min(depth, 99)) * 1000 + (Number(e.order) || 0);
+                if (beforeSlotOk) Object.assign(e, { position: POS.before, order });
+                else toTop(e, list, order);
             }
         }
     }
 
+    const wrap = (from, uid, content, order, depth) => ({
+        ...from, uid, world: WRAP_WORLD, comment: content, content, order,
+        key: [], keysecondary: [], constant: true, disable: false, selective: false,
+        useProbability: false, probability: 100, group: '', groupOverride: false,
+        sticky: 0, cooldown: 0, delay: 0, position: POS.atDepth, depth, role: ROLE_SYSTEM,
+        excludeRecursion: true, preventRecursion: true,
+    });
     if (moved && template && target) {
-        const wrap = (uid, content, order) => ({
-            ...template, uid, world: WRAP_WORLD, comment: content, content, order,
-            key: [], keysecondary: [], constant: true, disable: false, selective: false,
-            useProbability: false, probability: 100, group: '', groupOverride: false,
-            sticky: 0, cooldown: 0, delay: 0, position: POS.atDepth, depth: 0, role: ROLE_SYSTEM,
-            excludeRecursion: true, preventRecursion: true,
-        });
-        target.push(wrap(-910001, WRAP_OPEN, -1000000), wrap(-910002, WRAP_CLOSE, 1000000));
+        target.push(wrap(template, -910001, WRAP_OPEN, -1000000, 0), wrap(template, -910002, WRAP_CLOSE, 1000000, 0));
+    }
+    if (topMoved && topTemplate && topTarget) {
+        topTarget.push(wrap(topTemplate, -910003, STATIC_OPEN, -1000000, TOP_DEPTH), wrap(topTemplate, -910004, STATIC_CLOSE, 1000000, TOP_DEPTH));
     }
 }
 
@@ -144,40 +175,78 @@ function isVolatileHead(head) {
     return [...volatileHeads, ...learnedHeads].some(h => h && head.startsWith(h));
 }
 
-function findHistoryEnd(chat, firstTurn) {
-    const heads = settings().historyEndHeads;
-    return chat.findIndex((m, i) => i > firstTurn && m.role === 'system' && heads.some(h => h && text(m).trimStart().startsWith(h)));
+function normalize(value) {
+    return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+/** 最近的真实聊天消息各取几段文字，用来在提示词里认出哪些是聊天记录 */
+function historySnippets() {
+    return (ctx().chat ?? [])
+        .filter(m => m && !m.is_system && typeof m.mes === 'string' && m.mes.trim())
+        .slice(-60)
+        .map(m => {
+            const t = normalize(m.mes);
+            if (t.length <= 60) return [t];
+            // 取中段：开头常是思维链、结尾常是变量块，都可能被正则删掉
+            return [0.3, 0.5, 0.7].map(p => t.slice(Math.floor(t.length * p), Math.floor(t.length * p) + 30));
+        });
+}
+
+/**
+ * 找出提示词里真正的聊天记录范围。很多预设在聊天记录前放伪造的 user/assistant 对话、规则和资料，
+ * 不能把「第一条非 system 消息」当成聊天记录的开头，所以拿真实聊天消息逐条比对。
+ */
+function findHistoryRange(chat) {
+    const snippets = historySnippets();
+    if (!snippets.length) return null;
+    let start = -1, end = -1;
+    chat.forEach((m, i) => {
+        if (m.role === 'system') return;
+        const t = normalize(text(m));
+        if (t && snippets.some(list => list.some(s => s && t.includes(s)))) {
+            if (start < 0) start = i;
+            end = i;
+        }
+    });
+    return start < 0 ? null : { start, end };
 }
 
 function reorder(chat) {
+    const range = findHistoryRange(chat);
     const firstTurn = chat.findIndex(m => m.role !== 'system');
-    if (firstTurn < 0) return 0;
-    const historyEnd = findHistoryEnd(chat, firstTurn);
-    const end = historyEnd >= 0 ? historyEnd : chat.findLastIndex(m => m.role === 'user');
-    if (end < 0) return 0;
+    // 认不出聊天记录时退回旧规则：第一条非 system 消息到最后一条用户消息之间
+    const start = range ? range.start : firstTurn;
+    const end = range ? range.end : chat.findLastIndex(m => m.role === 'user');
+    if (start < 0 || end < 0) return 0;
+    const anchor = chat[end];
 
     const moved = [];
-    for (let i = end - 1; i >= firstTurn; i--) {
-        if (chat[i].role === 'system') moved.unshift(...chat.splice(i, 1));
+    // 聊天记录中间插入的 system 块：每多一轮位置就后移，会改写上一轮的前缀
+    for (let i = end - 1; i > start; i--) {
+        // 插在聊天记录最顶端的固定设定块就是要留在前面的
+        if (chat[i].role === 'system' && !text(chat[i]).trimStart().startsWith(STATIC_OPEN)) moved.unshift(...chat.splice(i, 1));
     }
-    for (let i = firstTurn - 1; i >= 0; i--) {
-        if (isVolatileHead(headOf(chat[i]))) moved.unshift(...chat.splice(i, 1));
+    // 聊天记录之前的易变块（柏宝书历史摘要、学到的易变块、现场调整出来的动态世界书块）
+    for (let i = start - 1; i >= 0; i--) {
+        const t = text(chat[i]).trimStart();
+        if (chat[i].role === 'system' && (isVolatileHead(headOf(chat[i])) || t.startsWith(WRAP_OPEN))) moved.unshift(...chat.splice(i, 1));
     }
     if (!moved.length) return 0;
 
-    const newFirst = chat.findIndex(m => m.role !== 'system');
-    const newEnd = findHistoryEnd(chat, newFirst);
-    const at = newEnd >= 0 ? newEnd : chat.findLastIndex(m => m.role === 'user');
-    chat.splice(at < 0 ? chat.length : at, 0, ...moved);
+    const at = chat.indexOf(anchor);
+    // 认出了聊天记录：放在它之后；否则放在最后一条用户消息之前
+    chat.splice(range ? at + 1 : at, 0, ...moved);
     return moved.length;
 }
 
-/** 系统提示里同一开头的块内容变了 → 记为易变，下一轮起挪到聊天记录之后 */
+/** 聊天记录之前的固定区域里，同一开头的块内容变了 → 记为易变，下一轮起挪到聊天记录之后 */
 function learnFrom(chat) {
     const s = settings();
     if (!s.learn) return [];
+    const range = findHistoryRange(chat);
     const firstTurn = chat.findIndex(m => m.role !== 'system');
-    const blocks = chat.slice(0, firstTurn < 0 ? chat.length : firstTurn).map(m => ({ head: headOf(m), body: text(m) }));
+    const stop = range ? range.start : (firstTurn < 0 ? chat.length : firstTurn);
+    const blocks = chat.slice(0, stop).filter(m => m.role === 'system').map(m => ({ head: headOf(m), body: text(m) }));
     const learned = [];
     if (lastSystemBlocks && lastSystemBlocks.chatId === ctx().getCurrentChatId()) {
         const prev = new Map(lastSystemBlocks.blocks.map(b => [b.head, b.body]));

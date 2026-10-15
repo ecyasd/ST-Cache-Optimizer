@@ -7,6 +7,6 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Claude (Anthropic)",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "auto_update": false
 }
