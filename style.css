@@ -1,0 +1,22 @@
+.cacheopt-settings .cacheopt-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 6px 0;
+}
+
+.cacheopt-settings .cacheopt-report {
+    margin-top: 6px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--black30a, rgba(0, 0, 0, 0.3));
+    font-size: 0.9em;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.cacheopt-settings .cacheopt-hint {
+    opacity: 0.75;
+    font-size: 0.85em;
+}

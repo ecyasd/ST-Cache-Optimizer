@@ -1,0 +1,12 @@
+{
+  "display_name": "缓存优化 (Cache Optimizer)",
+  "homePage": "https://github.com/pzwtxdy831-commits/ST-Cache-Optimizer",
+  "loading_order": 120,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "pzwtxdy831-commits",
+  "version": "2.0.0",
+  "auto_update": false
+}
