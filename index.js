@@ -109,6 +109,17 @@ function presetSlotBeforeHistory(identifier) {
     return slot < history;
 }
 
+/**
+ * 聊天记录前的 system 块会不会被并进同一条消息。Gemini / Vertex 会把非开头的 system 块转成 user 并与相邻消息合并，
+ * 提示词后处理（合并 / 半严格 / 严格）也会合并。实测 Vertex 只在消息边界上命中缓存：
+ * 近期剧情设定一旦并进前面那条大消息，它一变整条大消息都不命中，比放在聊天记录之后还亏。
+ */
+function systemBlocksGetMerged() {
+    const cc = ctx().chatCompletionSettings ?? {};
+    if (['makersuite', 'vertexai'].includes(cc.chat_completion_source)) return true;
+    return !!cc.custom_prompt_post_processing;
+}
+
 function routeEntries(lists) {
     const s = settings();
     if (!s.enabled || !s.routeWorldInfo) return;
@@ -121,6 +132,7 @@ function routeEntries(lists) {
     let topMoved = 0, topTemplate = null, topTarget = null;
     let stickyMoved = 0, stickyTemplate = null, stickyTarget = null;
     const stickyTurns = Math.max(0, Math.floor(Number(s.stickyTurns) || 0));
+    const stickyOn = s.stickyLore && !systemBlocksGetMerged();
     const toTop = (e, list, order) => {
         Object.assign(e, { position: POS.atDepth, depth: TOP_DEPTH, role: ROLE_SYSTEM, order });
         topMoved++;
@@ -138,7 +150,7 @@ function routeEntries(lists) {
             const pos = Number(e.position);
             if (pos === POS.before || pos === POS.after) {
                 // 关键词条目时有时无、动态常驻条目每轮都变：都不能留在系统提示里
-                if (s.stickyLore && !e.constant && !isDynamicContent(e)) {
+                if (stickyOn && !e.constant && !isDynamicContent(e)) {
                     // 关键词条目放回聊天记录之前（与固定设定同一条消息，排在其后），并粘住几轮：
                     // 场景不变时这块几轮不变，连同后面的聊天记录都能命中缓存
                     Object.assign(e, {
@@ -489,7 +501,7 @@ function renderSettings() {
           <label class="checkbox_label"><input id="cacheopt_route" type="checkbox"> 世界书现场调整：关键词 / 会变的条目移到聊天中（不改文件）</label>
           <label class="checkbox_label"><input id="cacheopt_hoist" type="checkbox"> 固定规则条目前移进系统提示</label>
           <label class="checkbox_label"><input id="cacheopt_sticky" type="checkbox"> 关键词设定放到聊天记录前并保持
-            <input id="cacheopt_sticky_turns" class="text_pole cacheopt-num" type="number" min="1" max="50"> 条消息（场景稳定时更省，换场景那轮更贵）</label>
+            <input id="cacheopt_sticky_turns" class="text_pole cacheopt-num" type="number" min="1" max="50"> 条消息（场景稳定时更省，换场景那轮更贵；Gemini / Vertex 或开了提示词后处理时自动不生效）</label>
           <label class="checkbox_label"><input id="cacheopt_learn" type="checkbox"> 自动学习系统提示里的易变块</label>
           <label class="cacheopt-label">保持原位的条目（正则，匹配条目名或内容开头）
             <input id="cacheopt_keep" class="text_pole" type="text">
