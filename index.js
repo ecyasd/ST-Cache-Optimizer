@@ -40,6 +40,8 @@ const POS = { before: 0, after: 1, anTop: 2, anBottom: 3, atDepth: 4, emTop: 5, 
 const ROLE_SYSTEM = 0;
 const HOIST_ORDER_BASE = 100000;
 const MAX_LEARNED = 30;
+const MAX_LEARN_CHARS = 20000;
+const changeCounts = new Map();
 // 常驻条目里出现这些就视为每轮可能变化。读固定配置的 {{getvar::xx}} 不算：它们开局设定后基本不变；
 // 真正每轮变的是 MVU 等消息级变量（stat_data / getMessageVar）、随机、时间、最新消息。
 const DYNAMIC_EJS = /stat_data|getMessageVar|getvar\(\s*['"`]stat_data|random|Math\.|Date|roll|_\.(sample|shuffle)|lastUserMessage|lastCharMessage|chat\[|incvar|addvar/;
@@ -265,7 +267,8 @@ function reorder(chat) {
     // 聊天记录之前的易变块（柏宝书历史摘要、学到的易变块、现场调整出来的动态世界书块）
     for (let i = start - 1; i >= 0; i--) {
         const t = text(chat[i]).trimStart();
-        if (chat[i].role === 'system' && !isTopBlock(chat[i]) && (isVolatileHead(headOf(chat[i])) || t.startsWith(WRAP_OPEN))) moved.unshift(...chat.splice(i, 1));
+        if (chat[i].role === 'system' && !isTopBlock(chat[i])
+            && ((isVolatileHead(headOf(chat[i])) && t.length <= MAX_LEARN_CHARS) || t.startsWith(WRAP_OPEN))) moved.unshift(...chat.splice(i, 1));
     }
     if (!moved.length) return 0;
 
@@ -289,6 +292,12 @@ function learnFrom(chat) {
         const prev = new Map(lastSystemBlocks.blocks.map(b => [b.head, b.body]));
         for (const b of blocks) {
             if (b.head.length < 4 || !prev.has(b.head) || prev.get(b.head) === b.body || isVolatileHead(b.head)) continue;
+            // 大块（整本世界书之类）挪到聊天记录之后，每轮整块按原价算，比偶尔变一次贵得多
+            if (b.body.length > MAX_LEARN_CHARS) continue;
+            // 偶发一次变化（改设置、换预设、脚本改了一次变量）不算，第二次变才学
+            const seen = (changeCounts.get(b.head) ?? 0) + 1;
+            changeCounts.set(b.head, seen);
+            if (seen < 2) continue;
             s.learnedHeads.push(b.head);
             learned.push(b.head);
         }
