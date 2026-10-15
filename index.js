@@ -333,6 +333,63 @@ async function checkStability() {
     ].filter(Boolean).join('\n'));
 }
 
+// ───────────────────────── 5. 真实发送对比 ─────────────────────────
+// 模拟检查看不到只在真实生成时才出现的变化（EJS 渲染、扩展在生成时注入、变量被脚本改写等）。
+// 这里在网络层旁观每次真实发出的请求（不修改、不额外请求），和同一聊天的上一次对比。
+
+const GENERATE_PATH = '/api/backends/chat-completions/generate';
+let lastReal = null;
+
+function describeReal(prev, cur, gapSec) {
+    const msgs = body => (Array.isArray(body.messages) ? body.messages : []).map(m => `[${m.role}]${text(m)}`);
+    const a = msgs(prev.body), b = msgs(cur.body);
+    let k = 0;
+    while (k < a.length && k < b.length && a[k] === b[k]) k++;
+    const sameChars = a.slice(0, k).reduce((s, t) => s + t.length + 1, 0);
+    const total = b.reduce((s, t) => s + t.length + 1, 0) || 1;
+    let at = 0;
+    if (k < b.length) while (at < (a[k] ?? '').length && a[k][at] === b[k][at]) at++;
+    const around = k < b.length ? b[k].slice(Math.max(0, at - 30), at + 60).replace(/\s+/g, ' ') : '';
+    const toolNames = body => JSON.stringify((body.tools ?? []).map(t => t?.function?.name ?? t?.name ?? ''));
+    return [
+        `${new Date().toLocaleTimeString()}｜距上一次真实发送 ${gapSec} 秒`,
+        `整条相同的前缀：${(sameChars / total * 100).toFixed(1)}%（前 ${k} 条消息 / 共 ${b.length} 条）`,
+        k < b.length ? `第一处不同：第 ${k + 1} 条（${cur.body.messages[k]?.role}），该条第 ${at} 字附近：${around}` : '两次完全相同',
+        toolNames(prev.body) !== toolNames(cur.body) ? '⚠ 两次的工具定义不同（工具名变化会让整轮 0 命中）' : '',
+        gapSec > 600 ? '⚠ 间隔超过 10 分钟，缓存可能已过期' : '',
+    ].filter(Boolean).join('\n');
+}
+
+function recordRealRequest(rawBody) {
+    let body;
+    try { body = JSON.parse(rawBody); } catch { return; }
+    if (!body || !Array.isArray(body.messages) || body.type === 'quiet') return;
+    const chatId = ctx().getCurrentChatId?.() ?? '';
+    const now = Date.now();
+    if (lastReal && lastReal.chatId === chatId) {
+        const report = describeReal(lastReal, { body }, Math.round((now - lastReal.at) / 1000));
+        settings().lastRealReport = report;
+        save();
+        $('#cacheopt_real').text(report);
+        console.info('[缓存优化] 真实发送对比\n' + report);
+    }
+    lastReal = { chatId, at: now, body };
+}
+
+function watchRealRequests() {
+    const original = window.fetch;
+    if (original.__cacheoptWatch) return;
+    const wrapped = function (input, init) {
+        try {
+            const url = typeof input === 'string' ? input : input?.url;
+            if (url && url.includes(GENERATE_PATH) && typeof init?.body === 'string') recordRealRequest(init.body);
+        } catch { /* 只旁观，出错不影响请求 */ }
+        return original.apply(this, arguments);
+    };
+    wrapped.__cacheoptWatch = true;
+    window.fetch = wrapped;
+}
+
 // ───────────────────────── 界面 ─────────────────────────
 
 function setEnabled(value) {
@@ -378,6 +435,8 @@ function renderSettings() {
           <div id="cacheopt_learned" class="cacheopt-hint"></div>
           <div id="cacheopt_last" class="cacheopt-hint"></div>
           <div id="cacheopt_report" class="cacheopt-report">点「检查缓存稳定性」查看两轮之间能命中缓存的比例。</div>
+          <div class="cacheopt-hint">真实发送对比（自动记录最近两次实际发出的请求）：</div>
+          <div id="cacheopt_real" class="cacheopt-report">同一聊天连续发送两次后显示。</div>
         </div>
       </div>
     </div>`;
@@ -397,6 +456,7 @@ function renderSettings() {
         renderLearned();
     });
     $('#cacheopt_last').text(lastRun);
+    if (settings().lastRealReport) $('#cacheopt_real').text(settings().lastRealReport);
     renderLearned();
 
     // 魔法棒菜单（左下角）一键开关，结构与酒馆自带的菜单项一致
@@ -414,6 +474,7 @@ function renderSettings() {
 jQuery(() => {
     settings();
     renderSettings();
+    watchRealRequests();
     const c = ctx();
     c.eventSource.on(c.eventTypes.WORLDINFO_ENTRIES_LOADED, data => {
         routeEntries([data?.globalLore, data?.characterLore, data?.chatLore, data?.personaLore]);
