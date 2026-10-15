@@ -19,6 +19,8 @@ const DEFAULTS = Object.freeze({
     routeWorldInfo: true,
     hoistStatic: true,
     learn: true,
+    stickyLore: false,
+    stickyTurns: 6,
     volatileHeads: ['〔记忆系统私密简报'],
     learnedHeads: [],
     keepPatterns: 'output_format|Force_Structured|^<\\/?Format>|jailbreak|破限',
@@ -28,8 +30,12 @@ const WRAP_CLOSE = '</当前剧情相关设定>';
 const WRAP_WORLD = '__cache_optimizer__';
 const STATIC_OPEN = '<固定设定>';
 const STATIC_CLOSE = '</固定设定>';
+const STICKY_OPEN = '<近期剧情设定>';
+const STICKY_CLOSE = '</近期剧情设定>';
+const STICKY_ORDER_BASE = 2000000;
 // 比任何聊天记录都深：插在聊天记录最顶端
-const TOP_DEPTH = 99999;
+// 酒馆只注入深度 0~10000（MAX_INJECTION_DEPTH），再大会被静默丢掉
+const TOP_DEPTH = 10000;
 const POS = { before: 0, after: 1, anTop: 2, anBottom: 3, atDepth: 4, emTop: 5, emBottom: 6, outlet: 7 };
 const ROLE_SYSTEM = 0;
 const HOIST_ORDER_BASE = 100000;
@@ -75,13 +81,18 @@ function keepRegex() {
 
 // ───────────────────────── 1. 世界书现场调整 ─────────────────────────
 
-function isDynamicEntry(entry) {
+/** 正文本身每轮可能不同（变量、随机、时间、概率触发）；与触发时机无关 */
+function isDynamicContent(entry) {
     const content = String(entry.content ?? '');
     const ejs = content.match(/<%[\s\S]*?%>/g) ?? [];
     if (ejs.some(block => DYNAMIC_EJS.test(block))) return true;
     if (DYNAMIC_MACRO.test(content) || DYNAMIC_TAG.test(content)) return true;
-    // 概率触发、粘性/冷却/延迟都会让条目时有时无
-    if (entry.useProbability && Number(entry.probability ?? 100) < 100) return true;
+    return !!entry.useProbability && Number(entry.probability ?? 100) < 100;
+}
+
+function isDynamicEntry(entry) {
+    if (isDynamicContent(entry)) return true;
+    // 粘性/冷却/延迟会让条目时有时无
     if (Number(entry.sticky) > 0 || Number(entry.cooldown) > 0 || Number(entry.delay) > 0) return true;
     return false;
 }
@@ -106,6 +117,8 @@ function routeEntries(lists) {
     const afterSlotOk = presetSlotBeforeHistory('worldInfoAfter');
     let moved = 0, template = null, target = null;
     let topMoved = 0, topTemplate = null, topTarget = null;
+    let stickyMoved = 0, stickyTemplate = null, stickyTarget = null;
+    const stickyTurns = Math.max(0, Math.floor(Number(s.stickyTurns) || 0));
     const toTop = (e, list, order) => {
         Object.assign(e, { position: POS.atDepth, depth: TOP_DEPTH, role: ROLE_SYSTEM, order });
         topMoved++;
@@ -123,7 +136,18 @@ function routeEntries(lists) {
             const pos = Number(e.position);
             if (pos === POS.before || pos === POS.after) {
                 // 关键词条目时有时无、动态常驻条目每轮都变：都不能留在系统提示里
-                if (!e.constant || isDynamicEntry(e)) {
+                if (s.stickyLore && !e.constant && !isDynamicContent(e)) {
+                    // 关键词条目放回聊天记录之前（与固定设定同一条消息，排在其后），并粘住几轮：
+                    // 场景不变时这块几轮不变，连同后面的聊天记录都能命中缓存
+                    Object.assign(e, {
+                        position: POS.atDepth, depth: TOP_DEPTH, role: ROLE_SYSTEM,
+                        order: STICKY_ORDER_BASE + (pos === POS.after ? 50000 : 0) + (Number(e.order) || 0),
+                        sticky: Math.max(Number(e.sticky) || 0, stickyTurns),
+                    });
+                    stickyMoved++;
+                    stickyTemplate ??= e;
+                    stickyTarget ??= list;
+                } else if (!e.constant || isDynamicEntry(e)) {
                     Object.assign(e, { position: POS.atDepth, depth: 0, role: ROLE_SYSTEM });
                     moved++;
                     template ??= e;
@@ -162,12 +186,24 @@ function routeEntries(lists) {
     if (topMoved && topTemplate && topTarget) {
         topTarget.push(wrap(topTemplate, -910003, STATIC_OPEN, -1000000, TOP_DEPTH), wrap(topTemplate, -910004, STATIC_CLOSE, 1000000, TOP_DEPTH));
     }
+    if (stickyMoved && stickyTemplate && stickyTarget) {
+        stickyTarget.push(
+            wrap(stickyTemplate, -910005, STICKY_OPEN, STICKY_ORDER_BASE - 500000, TOP_DEPTH),
+            wrap(stickyTemplate, -910006, STICKY_CLOSE, STICKY_ORDER_BASE + 1000000, TOP_DEPTH),
+        );
+    }
 }
 
 // ───────────────────────── 2. 发送前重排 + 3. 自动学习 ─────────────────────────
 
 function headOf(message) {
     return text(message).trimStart().split('\n', 1)[0].slice(0, 40);
+}
+
+/** 插在聊天记录最顶端、要留在前面的块（固定设定 / 近期剧情设定） */
+function isTopBlock(message) {
+    const t = text(message).trimStart();
+    return t.startsWith(STATIC_OPEN) || t.startsWith(STICKY_OPEN);
 }
 
 function isVolatileHead(head) {
@@ -224,12 +260,12 @@ function reorder(chat) {
     // 聊天记录中间插入的 system 块：每多一轮位置就后移，会改写上一轮的前缀
     for (let i = end - 1; i > start; i--) {
         // 插在聊天记录最顶端的固定设定块就是要留在前面的
-        if (chat[i].role === 'system' && !text(chat[i]).trimStart().startsWith(STATIC_OPEN)) moved.unshift(...chat.splice(i, 1));
+        if (chat[i].role === 'system' && !isTopBlock(chat[i])) moved.unshift(...chat.splice(i, 1));
     }
     // 聊天记录之前的易变块（柏宝书历史摘要、学到的易变块、现场调整出来的动态世界书块）
     for (let i = start - 1; i >= 0; i--) {
         const t = text(chat[i]).trimStart();
-        if (chat[i].role === 'system' && (isVolatileHead(headOf(chat[i])) || t.startsWith(WRAP_OPEN))) moved.unshift(...chat.splice(i, 1));
+        if (chat[i].role === 'system' && !isTopBlock(chat[i]) && (isVolatileHead(headOf(chat[i])) || t.startsWith(WRAP_OPEN))) moved.unshift(...chat.splice(i, 1));
     }
     if (!moved.length) return 0;
 
@@ -246,7 +282,8 @@ function learnFrom(chat) {
     const range = findHistoryRange(chat);
     const firstTurn = chat.findIndex(m => m.role !== 'system');
     const stop = range ? range.start : (firstTurn < 0 ? chat.length : firstTurn);
-    const blocks = chat.slice(0, stop).filter(m => m.role === 'system').map(m => ({ head: headOf(m), body: text(m) }));
+    // 顶端设定块随场景变化是预期内的，不能学成易变块挪走
+    const blocks = chat.slice(0, stop).filter(m => m.role === 'system' && !isTopBlock(m)).map(m => ({ head: headOf(m), body: text(m) }));
     const learned = [];
     if (lastSystemBlocks && lastSystemBlocks.chatId === ctx().getCurrentChatId()) {
         const prev = new Map(lastSystemBlocks.blocks.map(b => [b.head, b.body]));
@@ -442,6 +479,8 @@ function renderSettings() {
           <label class="checkbox_label"><input id="cacheopt_enabled" type="checkbox"> 启用缓存优化</label>
           <label class="checkbox_label"><input id="cacheopt_route" type="checkbox"> 世界书现场调整：关键词 / 会变的条目移到聊天中（不改文件）</label>
           <label class="checkbox_label"><input id="cacheopt_hoist" type="checkbox"> 固定规则条目前移进系统提示</label>
+          <label class="checkbox_label"><input id="cacheopt_sticky" type="checkbox"> 关键词设定放到聊天记录前并保持
+            <input id="cacheopt_sticky_turns" class="text_pole cacheopt-num" type="number" min="1" max="50"> 条消息（场景稳定时更省，换场景那轮更贵）</label>
           <label class="checkbox_label"><input id="cacheopt_learn" type="checkbox"> 自动学习系统提示里的易变块</label>
           <label class="cacheopt-label">保持原位的条目（正则，匹配条目名或内容开头）
             <input id="cacheopt_keep" class="text_pole" type="text">
@@ -463,6 +502,12 @@ function renderSettings() {
     bindCheckbox('#cacheopt_route', 'routeWorldInfo');
     bindCheckbox('#cacheopt_hoist', 'hoistStatic');
     bindCheckbox('#cacheopt_learn', 'learn');
+    bindCheckbox('#cacheopt_sticky', 'stickyLore');
+    $('#cacheopt_sticky_turns').val(settings().stickyTurns).on('change', function () {
+        settings().stickyTurns = Math.min(50, Math.max(1, Math.floor(Number($(this).val())) || DEFAULTS.stickyTurns));
+        $(this).val(settings().stickyTurns);
+        save();
+    });
     $('#cacheopt_keep').val(settings().keepPatterns).on('change', function () {
         settings().keepPatterns = String($(this).val());
         save();
