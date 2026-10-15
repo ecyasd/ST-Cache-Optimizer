@@ -105,6 +105,13 @@ function routeEntries(lists) {
                     template ??= e;
                     target ??= list;
                 }
+            } else if (pos === POS.atDepth && (!e.constant || isDynamicEntry(e))) {
+                // 会变的深度条目统一放到深度 0：深度设得比聊天记录还大时它会落进系统提示，
+                // 放在中间也会随楼层后移改写前缀；深度 0 之后由发送前重排挪到聊天记录末尾
+                if (Number(e.depth) !== 0) {
+                    e.depth = 0;
+                    moved++;
+                }
             } else if (s.hoistStatic && e.constant && !isDynamicEntry(e)
                 && (pos === POS.atDepth || pos === POS.anTop || pos === POS.anBottom)) {
                 // 固定规则前移进系统提示；按原深度从深到浅、再按 order 排，保持原先的相对顺序
