@@ -1,17 +1,6 @@
-// 缓存优化 (Cache Optimizer) v2
-//
-// Gemini / Vertex 的隐式缓存（以及大多数按前缀计费的缓存）要求：
-//   - 开头的系统提示（第一条对话消息之前的所有 system 消息）每轮一字不差；
-//   - 之后的内容按前缀命中，每轮最好只在末尾追加。
-// 本扩展在不改任何文件的前提下，对任意预设 / 世界书生效：
-//   1. 世界书现场调整（WORLDINFO_ENTRIES_LOADED，只改本次扫描的临时副本）：
-//      - 「角色定义前/后」的关键词条目、会变的常驻条目（MVU 变量、随机宏、概率触发）→ 聊天中深度 0，
-//        外面用 <当前剧情相关设定> 包住；
-//      - 按深度 / 作者注释插入、内容固定的常驻条目 → 角色定义前（进入固定的系统提示）。
-//   2. 发送前重排（CHAT_COMPLETION_PROMPT_READY）：聊天记录中间的 system 块、系统提示里的易变块
-//      → 聊天记录末尾（「</聊天记录>」标记之前，没有标记则放在最新一条用户消息之前）。
-//   3. 自动学习：系统提示里两轮之间变化过的块记下开头特征，以后自动挪到聊天记录之后。
-//   4. 免费检查：只组装不发送，比较「上一轮」和「这一轮」的提示词，报告能命中缓存的比例。
+// 缓存优化 v2.5：按来源路由数据库召回，在 SETTINGS_READY 再处理最终消息。
+// 仅修改本轮扫描/请求副本；请求相似度和服务端缓存 token 分开报告。
+// 相同前缀能提高隐式缓存机会，但实际命中以 API 响应为准。
 
 const MODULE = 'cacheOptimizer';
 const DEFAULTS = Object.freeze({
@@ -21,6 +10,8 @@ const DEFAULTS = Object.freeze({
     learn: true,
     stickyLore: false,
     stickyTurns: 6,
+    compatShujuku: true,
+    compatIzumi: false,
     volatileHeads: ['〔记忆系统私密简报'],
     learnedHeads: [],
     keepPatterns: 'output_format|Force_Structured|^<\\/?Format>|jailbreak|破限',
@@ -42,12 +33,36 @@ const HOIST_ORDER_BASE = 100000;
 const MAX_LEARNED = 30;
 const MAX_LEARN_CHARS = 20000;
 const changeCounts = new Map();
+// constant 只代表常驻激活，不代表条目正文不会被其他扩展更新。
 // 常驻条目里出现这些就视为每轮可能变化。读固定配置的 {{getvar::xx}} 不算：它们开局设定后基本不变；
 // 真正每轮变的是 MVU 等消息级变量（stat_data / getMessageVar）、随机、时间、最新消息。
 const DYNAMIC_EJS = /stat_data|getMessageVar|getvar\(\s*['"`]stat_data|random|Math\.|Date|roll|_\.(sample|shuffle)|lastUserMessage|lastCharMessage|chat\[|incvar|addvar/;
 const DYNAMIC_MACRO = /\{\{(roll|random|pick|time|date|weekday|isotime|isodate|datetimeformat|idle_duration|lastMessage|lastUserMessage|lastCharMessage|lastMessageId)/i;
 // MVU 变量块是「标签后紧跟模板代码」；正文里只是提到标签名的规则条目不算
 const DYNAMIC_TAG = /<status_current_variables>\s*(<%|\{\{)/i;
+const SHUJUKU_TEMPLATE = /\{\[\s*(?:db|sql)\b|\$(?:random|calc|max|min)\b|<(?:random|calc|max|min|if)\b/i;
+const IZUMI_MEMORY = /<!--\s*IZM7_[\w-]+\s*-->\s*<KonataExtraInformation>[\s\S]*?<\/KonataExtraInformation>/g;
+
+function isShujukuEntry(entry) {
+    if (!settings().compatShujuku) return false;
+    const raw = String(entry.comment ?? entry.name ?? '');
+    const marker = raw.match(/<!--\s*ACU_CUSTOM_TABLE_EXPORT_V1\s+({[\s\S]*?})\s*-->/);
+    if (marker) {
+        try {
+            const m = JSON.parse(marker[1]);
+            if (m.version === 1 && m.kind === 'custom_table_export'
+                && ['main', 'row', 'header', 'wrapper_before', 'wrapper_after', 'index'].includes(m.role)
+                && ['sheetKey', 'tableName', 'entryName'].every(k => typeof m[k] === 'string' && m[k].trim())) return true;
+        } catch { /* 不凭损坏的元数据认定来源 */ }
+    }
+    const name = raw.trim().replace(/^ACU-\[[^\]]+\]-/, '');
+    if (name.startsWith('外部导入-') || name.startsWith('TavernDB-ACU-AgentGreenlight')) return false;
+    return /^(?:TavernDB-ACU-|重要人物条目|总结条目|小总结条目)/.test(name);
+}
+
+function isIzumiMemory(content) {
+    return settings().compatIzumi && new RegExp(IZUMI_MEMORY.source).test(content);
+}
 
 let lastRun = '尚未发送过请求';
 let lastSystemBlocks = null;
@@ -86,6 +101,8 @@ function keepRegex() {
 /** 正文本身每轮可能不同（变量、随机、时间、概率触发）；与触发时机无关 */
 function isDynamicContent(entry) {
     const content = String(entry.content ?? '');
+    if (isShujukuEntry(entry) || isIzumiMemory(content)) return true;
+    if (settings().compatShujuku && SHUJUKU_TEMPLATE.test(content)) return true;
     const ejs = content.match(/<%[\s\S]*?%>/g) ?? [];
     if (ejs.some(block => DYNAMIC_EJS.test(block))) return true;
     if (DYNAMIC_MACRO.test(content) || DYNAMIC_TAG.test(content)) return true;
@@ -111,8 +128,8 @@ function presetSlotBeforeHistory(identifier) {
 
 /**
  * 聊天记录前的 system 块会不会被并进同一条消息。Gemini / Vertex 会把非开头的 system 块转成 user 并与相邻消息合并，
- * 提示词后处理（合并 / 半严格 / 严格）也会合并。实测 Vertex 只在消息边界上命中缓存：
- * 近期剧情设定一旦并进前面那条大消息，它一变整条大消息都不命中，比放在聊天记录之后还亏。
+ * 提示词后处理也会合并。这里保守禁用 stickyLore，避免把可变召回放回较早位置；
+ * 不能由消息是否合并推断服务端实际缓存边界。
  */
 function systemBlocksGetMerged() {
     const cc = ctx().chatCompletionSettings ?? {};
@@ -146,7 +163,8 @@ function routeEntries(lists) {
             if (!e || e.disable || e.world === WRAP_WORLD) continue;
             // 只看条目名和正文第一行，避免正文里随口提到的词误判
             const firstLine = String(e.content ?? '').trimStart().split('\n', 1)[0];
-            if (keep.test(String(e.comment ?? '')) || keep.test(firstLine)) continue;
+            const ownedDynamic = isShujukuEntry(e) || isIzumiMemory(String(e.content ?? ''));
+            if (!ownedDynamic && (keep.test(String(e.comment ?? '')) || keep.test(firstLine))) continue;
             const pos = Number(e.position);
             if (pos === POS.before || pos === POS.after) {
                 // 关键词条目时有时无、动态常驻条目每轮都变：都不能留在系统提示里
@@ -236,9 +254,10 @@ function historySnippets() {
         .slice(-60)
         .map(m => {
             const t = normalize(m.mes);
-            if (t.length <= 60) return [t];
+            if (t.length <= 60) return { role: m.is_user ? 'user' : 'assistant', exact: t, snippets: [] };
             // 取中段：开头常是思维链、结尾常是变量块，都可能被正则删掉
-            return [0.3, 0.5, 0.7].map(p => t.slice(Math.floor(t.length * p), Math.floor(t.length * p) + 30));
+            return { role: m.is_user ? 'user' : 'assistant', exact: t,
+                snippets: [0.3, 0.5, 0.7].map(p => t.slice(Math.floor(t.length * p), Math.floor(t.length * p) + 30)) };
         });
 }
 
@@ -253,7 +272,9 @@ function findHistoryRange(chat) {
     chat.forEach((m, i) => {
         if (m.role === 'system') return;
         const t = normalize(text(m));
-        if (t && snippets.some(list => list.some(s => s && t.includes(s)))) {
+        if (t && snippets.some(item => item.role === m.role && (t === item.exact
+            || (item.exact.length > 8 && t.endsWith(`: ${item.exact}`))
+            || item.snippets.some(s => s && t.includes(s))))) {
             if (start < 0) start = i;
             end = i;
         }
@@ -263,10 +284,9 @@ function findHistoryRange(chat) {
 
 function reorder(chat) {
     const range = findHistoryRange(chat);
-    const firstTurn = chat.findIndex(m => m.role !== 'system');
-    // 认不出聊天记录时退回旧规则：第一条非 system 消息到最后一条用户消息之间
-    const start = range ? range.start : firstTurn;
-    const end = range ? range.end : chat.findLastIndex(m => m.role === 'user');
+    // 预设伪对话与数据库辅助请求也有 user/assistant；无法确认真实历史时不猜。
+    if (!range) return 0;
+    const { start, end } = range;
     if (start < 0 || end < 0) return 0;
     const anchor = chat[end];
 
@@ -280,7 +300,8 @@ function reorder(chat) {
     for (let i = start - 1; i >= 0; i--) {
         const t = text(chat[i]).trimStart();
         if (chat[i].role === 'system' && !isTopBlock(chat[i])
-            && ((isVolatileHead(headOf(chat[i])) && t.length <= MAX_LEARN_CHARS) || t.startsWith(WRAP_OPEN))) moved.unshift(...chat.splice(i, 1));
+            && (chat[i].__cacheoptDynamic
+                || (isVolatileHead(headOf(chat[i])) && t.length <= MAX_LEARN_CHARS) || t.startsWith(WRAP_OPEN))) moved.unshift(...chat.splice(i, 1));
     }
     if (!moved.length) return 0;
 
@@ -288,6 +309,44 @@ function reorder(chat) {
     // 认出了聊天记录：放在它之后；否则放在最后一条用户消息之前
     chat.splice(range ? at + 1 : at, 0, ...moved);
     return moved.length;
+}
+
+/** 只拆来源明确、成对完整的 system 包裹；绝不按用户正文或单个变量值猜测来源。 */
+function splitKnownDynamicBlocks(chat) {
+    const range = findHistoryRange(chat);
+    if (!range) return;
+    for (let i = range.end - 1; i >= 0; i--) {
+        const message = chat[i];
+        if (message.role !== 'system' || typeof message.content !== 'string' || isTopBlock(message)) continue;
+        const patterns = [];
+        if (settings().compatIzumi) patterns.push(IZUMI_MEMORY.source);
+        if (settings().compatShujuku) {
+            for (const tag of ['最新数据与记录', '过往记忆', '剧情大纲编码索引']) {
+                // 标签必须各自独占一行且唯一，避免正文里提到标签时误拆。
+                const opens = message.content.split(`<${tag}>`).length - 1;
+                const closes = message.content.split(`</${tag}>`).length - 1;
+                if (opens === 1 && closes === 1) patterns.push(`^<${tag}>[^\\S\\n]*\\n[\\s\\S]*?^<\/${tag}>[^\\S\\n]*(?=\\n|$)`);
+            }
+        }
+        if (!patterns.length || text(message).trimStart().startsWith(WRAP_OPEN)) continue;
+        const matches = [...message.content.matchAll(new RegExp(patterns.join('|'), 'gm'))];
+        if (!matches.length) continue;
+        const pieces = [];
+        let at = 0;
+        for (const match of matches) {
+            const before = message.content.slice(at, match.index);
+            if (before) pieces.push({ ...message, content: before });
+            pieces.push({ ...message, content: match[0], __cacheoptDynamic: true });
+            at = match.index + match[0].length;
+        }
+        const after = message.content.slice(at);
+        if (after) pieces.push({ ...message, content: after });
+        // 不向模型发送内部识别字段；用非枚举属性保留本轮来源。
+        for (const piece of pieces) if (piece.__cacheoptDynamic) {
+            Object.defineProperty(piece, '__cacheoptDynamic', { value: true, enumerable: false });
+        }
+        chat.splice(i, 1, ...pieces);
+    }
 }
 
 /** 聊天记录之前的固定区域里，同一开头的块内容变了 → 记为易变，下一轮起挪到聊天记录之后 */
@@ -323,72 +382,50 @@ function learnFrom(chat) {
 }
 
 function onPromptReady(data) {
+    armFinalHook();
     if (!settings().enabled || !Array.isArray(data?.chat)) return;
+    splitKnownDynamicBlocks(data.chat);
     const n = reorder(data.chat);
     if (data.dryRun) return;
-    const learned = learnFrom(data.chat);
     lastRun = `${new Date().toLocaleTimeString()} 发送前重排：移动了 ${n} 个块`
-        + (learned.length ? `；新学到易变块 ${learned.length} 个（下一轮生效）` : '');
+        + '（等待数据库及预设的最终处理）';
     $('#cacheopt_last').text(lastRun);
     renderLearned();
 }
 
-// ───────────────────────── 4. 免费稳定性检查 ─────────────────────────
-
-async function captureDryRun() {
-    const c = ctx();
-    let captured = null;
-    const handler = data => { captured = structuredClone(data.chat); };
-    c.eventSource.on(c.eventTypes.CHAT_COMPLETION_PROMPT_READY, handler);
-    try {
-        await c.generate('normal', {}, true);
-    } finally {
-        c.eventSource.removeListener(c.eventTypes.CHAT_COMPLETION_PROMPT_READY, handler);
-    }
-    return captured;
+function onSettingsReady(data) {
+    if (!settings().enabled || !Array.isArray(data?.messages) || data.type === 'quiet') return;
+    if (!findHistoryRange(data.messages)) return;
+    splitKnownDynamicBlocks(data.messages);
+    const learned = learnFrom(data.messages);
+    const n = reorder(data.messages);
+    lastRun = `${new Date().toLocaleTimeString()} 最终请求重排：移动了 ${n} 个块`
+        + (learned.length ? `；新学到易变块 ${learned.length} 个` : '');
+    $('#cacheopt_last').text(lastRun);
+    renderLearned();
 }
 
-async function checkStability() {
+function armFinalHook() {
     const c = ctx();
-    const report = $('#cacheopt_report');
-    if (c.mainApi !== 'openai') return report.text('只支持对话补全（Chat Completion）接口。');
-    const lastUser = c.chat.findLastIndex(m => m.is_user);
-    if (lastUser < 2) return report.text('聊天记录太短，至少需要两轮对话。');
-    report.text('检查中（只组装、不发送，不花钱）…');
+    const event = c.eventTypes.CHAT_COMPLETION_SETTINGS_READY;
+    if (!event) return;
+    // 数据库和泉的脚本可能晚于本插件加载；在每次 PROMPT_READY 重新排到队尾。
+    c.eventSource.removeListener(event, onSettingsReady);
+    if (typeof c.eventSource.makeLast === 'function') c.eventSource.makeLast(event, onSettingsReady);
+    else c.eventSource.on(event, onSettingsReady);
+}
 
-    const original = c.chat.length;
-    let previous;
-    const removed = c.chat.splice(lastUser - 1);
-    try {
-        previous = await captureDryRun();
-    } finally {
-        c.chat.push(...removed);
-    }
-    const current = await captureDryRun();
-    if (c.chat.length !== original || !previous || !current) return report.text('检查失败：没能组装出提示词。');
+// ───────────────────────── 4. 测试指引（不改聊天、不请求模型） ─────────────────────────
 
-    const flat = list => list.map(m => `[${m.role}]${text(m)}`).join('\n');
-    const lead = list => { let k = 0; while (k < list.length && list[k].role === 'system') k++; return k; };
-    const a = flat(previous), b = flat(current);
-    let i = 0;
-    while (i < a.length && a[i] === b[i]) i++;
-    let at = 0, acc = 0;
-    for (; at < current.length; at++) {
-        acc += flat([current[at]]).length + 1;
-        if (acc > i) break;
-    }
-    const sysPrev = previous.slice(0, lead(previous)), sysCur = current.slice(0, lead(current));
-    const systemSame = flat(sysPrev) === flat(sysCur);
-    const changed = systemSame ? [] : sysCur.filter((m, k) => text(m) !== text(sysPrev[k])).map(headOf);
-    report.text([
-        `系统提示两轮一致：${systemSame ? '✅ 是' : '❌ 否（Vertex/Gemini 会整轮 0 命中）'}`,
-        changed.length ? `系统提示里变化的块：${changed.slice(0, 5).join(' / ')}` : '',
-        `两轮相同的前缀：${(i / b.length * 100).toFixed(1)}%（约 ${i.toLocaleString()} / ${b.length.toLocaleString()} 字）`,
-        `第一次不同出现在第 ${at + 1} 条消息（${current[at]?.role}）：`,
-        text(current[at]).slice(0, 80).replace(/\s+/g, ' '),
-        '注：模拟不包含记忆扩展「折叠旧楼」这类每轮真实发生的变化。',
-        settings().enabled ? '' : '（当前未启用，开启后再检查一次可对比效果）',
-    ].filter(Boolean).join('\n'));
+function checkStability() {
+    $('#cacheopt_report').text([
+        '连续楼层测试：保持同一角色卡、世界书、预设、正文模型和连接，正常聊天至少 3 轮，每轮输入不同内容，并让数据库照常召回。',
+        '切换优化开关后分别观察至少 3 轮；不要将切换后的第一轮作为效果结论。数据库辅助模型请求不与正文请求配对。',
+        '“重复请求”只说明重发相同内容；“连续楼层”才对应正常推进。相同字符前缀只是诊断，不是缓存 token 命中率。',
+        '实际缓存以 API 返回 cachedContentTokenCount / cached_tokens 为准。没有返回统计时显示“未知”，不能当成 0。',
+        'Vertex 建议启用流式输出：部分酒馆版本的非流式响应会丢失 usageMetadata。',
+        '此按钮不截短历史、不触发生成，也不会额外消耗 API。',
+    ].join('\n'));
 }
 
 // ───────────────────────── 5. 真实发送对比 ─────────────────────────
@@ -397,12 +434,12 @@ async function checkStability() {
 
 const GENERATE_PATH = '/api/backends/chat-completions/generate';
 const RECENT_LIMIT = 8;
-// 同一聊天最近几次真实请求；扩展的辅助请求（摘要、生图提示词等）也会经过这里，
-// 所以新请求和其中「共同前缀最长」的一次配对，正常对话自然会和正常对话比。
+const ACU_INTERNAL = Symbol.for('acu.internal-generation-fetch');
+// 仅在同聊天、同来源/模型/请求类型内，对比紧邻上次请求，避免重复请求美化连续楼层结果。
 let recentReal = [];
 
 function messageTexts(body) {
-    return (Array.isArray(body.messages) ? body.messages : []).map(m => `[${m.role}]${text(m)}`);
+    return (Array.isArray(body.messages) ? body.messages : []).map(m => JSON.stringify(m));
 }
 
 function sharedPrefix(a, b) {
@@ -419,48 +456,131 @@ function describeReal(prev, cur, gapSec) {
     const { k, at, chars } = sharedPrefix(a, b);
     const total = b.reduce((s, t) => s + t.length + 1, 0) || 1;
     const show = s => s.slice(Math.max(0, at - 40), at + 80).replace(/\s+/g, ' ');
-    const toolNames = body => JSON.stringify((body.tools ?? []).map(t => t?.function?.name ?? t?.name ?? ''));
+    const toolSchema = body => JSON.stringify({ tools: body.tools ?? [], tool_choice: body.tool_choice, json_schema: body.json_schema });
+    const repeated = JSON.stringify(a) === JSON.stringify(b) && toolSchema(prev.body) === toolSchema(cur.body);
+    const advanced = prev.history && cur.history && cur.history.userCount > prev.history.userCount
+        && cur.history.lastUser !== prev.history.lastUser;
     return [
-        `${new Date().toLocaleTimeString()}｜对比 ${gapSec} 秒前最相似的一次真实请求（${a.length} 条 → ${b.length} 条消息）`,
-        `相同的前缀：${(chars / total * 100).toFixed(1)}%（约 ${chars.toLocaleString()} / ${total.toLocaleString()} 字，前 ${k} 条完全相同）`,
-        k < b.length ? `第一处不同：第 ${k + 1} 条（${cur.body.messages[k]?.role}），该条第 ${at} 字` : '两次完全相同',
+        `${new Date().toLocaleTimeString()}｜对比 ${gapSec} 秒前同模型的上一次正文请求（${a.length} 条 → ${b.length} 条消息）`,
+        `请求类型：${repeated ? '重复请求（不能证明连续楼层效果）' : advanced ? '连续楼层（用户输入不同）' : '其他变化（重试、改写或历史状态不明）'}`,
+        `请求前缀文本相似度：${(chars / total * 100).toFixed(1)}%（约 ${chars.toLocaleString()} / ${total.toLocaleString()} 字，前 ${k} 条完全相同；不是缓存命中率）`,
+        k < b.length ? `第一处不同：第 ${k + 1} 条（${cur.body.messages[k]?.role}），该条第 ${at} 字` : '当前消息数组为上次的完整相同前缀或完全相同（另检查工具定义）',
         k < b.length ? `　上次：${show(a[k] ?? '（无）')}` : '',
         k < b.length ? `　这次：${show(b[k])}` : '',
-        toolNames(prev.body) !== toolNames(cur.body) ? '⚠ 两次的工具定义不同（工具名变化会让整轮 0 命中）' : '',
-        gapSec > 600 ? '⚠ 间隔超过 10 分钟，缓存可能已过期' : '',
+        toolSchema(prev.body) !== toolSchema(cur.body) ? '⚠ 工具定义发生变化（包括参数 schema），需结合 API 缓存统计判断影响' : '',
+        '观察阶段：浏览器发往酒馆的最终请求；酒馆后端还会转换为 Vertex 格式。',
     ].filter(Boolean).join('\n');
 }
 
 function recordRealRequest(rawBody) {
     let body;
     try { body = JSON.parse(rawBody); } catch { return; }
-    if (!body || !Array.isArray(body.messages) || body.type === 'quiet') return;
+    if (!body || !Array.isArray(body.messages) || body.type === 'quiet' || !findHistoryRange(body.messages)) return null;
     const chatId = ctx().getCurrentChatId?.() ?? '';
     const now = Date.now();
-    const cur = { chatId, at: now, body, texts: messageTexts(body) };
-    const candidates = recentReal.filter(r => r.chatId === chatId);
+    const channel = JSON.stringify([body.chat_completion_source, body.model, body.type, body.reverse_proxy, body.custom_url]);
+    const history = ctx().chat ?? [];
+    const cur = { chatId, channel, at: now, body, texts: messageTexts(body), history: {
+        count: history.length, userCount: history.filter(m => m.is_user).length,
+        lastUser: history.findLast(m => m.is_user)?.mes ?? '',
+    } };
+    const candidates = recentReal.filter(r => r.chatId === chatId && r.channel === channel);
     if (candidates.length) {
-        const best = candidates
-            .map(r => ({ r, score: sharedPrefix(r.texts, cur.texts).chars }))
-            .sort((x, y) => y.score - x.score)[0].r;
-        const report = describeReal(best, cur, Math.round((now - best.at) / 1000));
+        const previous = candidates.at(-1);
+        const report = describeReal(previous, cur, Math.round((now - previous.at) / 1000));
         settings().lastRealReport = report;
         save();
         $('#cacheopt_real').text(report);
         console.info('[缓存优化] 真实发送对比\n' + report);
     }
     recentReal = [...recentReal.filter(r => r.chatId === chatId), cur].slice(-RECENT_LIMIT);
+    $('#cacheopt_usage').text(`${body.model ?? '当前正文模型'}｜API 缓存统计：等待响应…`);
+    return cur;
+}
+
+/** 缺失统计与明确返回 0 严格分开；只读取响应，不推算 token。 */
+function readUsage(payload) {
+    if (!payload || typeof payload !== 'object') return null;
+    const usage = payload.usageMetadata ?? payload.usage_metadata ?? payload.usage;
+    if (!usage || typeof usage !== 'object') return null;
+    const count = (...values) => values.find(v => typeof v === 'number' && Number.isFinite(v) && v >= 0) ?? null;
+    const cached = count(usage.cachedContentTokenCount, usage.cached_content_token_count,
+        usage.prompt_tokens_details?.cached_tokens, usage.input_tokens_details?.cached_tokens,
+        usage.cache_read_input_tokens, usage.total_cached_tokens);
+    const total = count(usage.promptTokenCount, usage.prompt_token_count, usage.prompt_tokens, usage.input_tokens, usage.total_input_tokens);
+    return cached === null && total === null ? null : { cached, total };
+}
+
+async function observeUsage(response, request) {
+    if (!request || !response.ok) return;
+    let usage = null;
+    try {
+        const copy = response.clone();
+        const accept = payload => {
+            const value = readUsage(payload);
+            if (value) usage = { cached: value.cached ?? usage?.cached ?? null, total: value.total ?? usage?.total ?? null };
+        };
+        if ((copy.headers.get('content-type') ?? '').includes('text/event-stream')) {
+            const reader = copy.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            const line = value => {
+                if (!value.startsWith('data:')) return;
+                try { accept(JSON.parse(value.slice(5).trim())); } catch { /* DONE/非 JSON 帧 */ }
+            };
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    buffer += decoder.decode(value, { stream: !done });
+                    let end;
+                    while ((end = buffer.indexOf('\n')) >= 0) {
+                        line(buffer.slice(0, end).replace(/\r$/, ''));
+                        buffer = buffer.slice(end + 1);
+                    }
+                    // 异常或超大 SSE 单帧时停止观察，不影响原响应。
+                    if (buffer.length > 4 * 1024 * 1024) { void reader.cancel(); break; }
+                    if (done) { if (buffer) line(buffer); break; }
+                }
+            } finally { reader.releaseLock(); }
+        } else accept(await copy.json());
+    } catch { /* 原响应继续交给酒馆；旁观失败不能被算作 0 */ }
+    if (ctx().getCurrentChatId?.() !== request.chatId || recentReal.at(-1) !== request) return;
+    const ratio = usage?.cached !== null && usage?.cached !== undefined && usage?.total > 0
+        ? `（${(usage.cached / usage.total * 100).toFixed(1)}%）` : '';
+    const report = `${request.body.model ?? '当前正文模型'}｜API 缓存 token：${usage?.cached ?? '未知（响应未返回缓存字段）'}`
+        + `${usage?.total !== null && usage?.total !== undefined ? ` / 输入 ${usage.total}` : ''}${ratio}`;
+    settings().lastUsageReport = report;
+    save();
+    $('#cacheopt_usage').text(report);
+}
+
+function recordRequestFailure(request) {
+    if (!request) return;
+    const latest = recentReal.at(-1) === request;
+    recentReal = recentReal.filter(r => r !== request);
+    if (latest && ctx().getCurrentChatId?.() === request.chatId) {
+        $('#cacheopt_usage').text('正文请求失败或已取消：没有可确认的 API 缓存统计。');
+    }
 }
 
 function watchRealRequests() {
     const original = window.fetch;
     if (original.__cacheoptWatch) return;
     const wrapped = function (input, init) {
+        let request = null;
         try {
             const url = typeof input === 'string' ? input : input?.url;
-            if (url && url.includes(GENERATE_PATH) && typeof init?.body === 'string') recordRealRequest(init.body);
+            // 数据库已公开的内存标记；辅助模型处理输入/召回，不纳入正文统计。
+            if (!init?.[ACU_INTERNAL] && url && url.includes(GENERATE_PATH) && typeof init?.body === 'string') request = recordRealRequest(init.body);
         } catch { /* 只旁观，出错不影响请求 */ }
-        return original.apply(this, arguments);
+        return original.apply(this, arguments).then(response => {
+            if (!response.ok) recordRequestFailure(request);
+            else if (request) void observeUsage(response, request);
+            return response;
+        }, error => {
+            recordRequestFailure(request);
+            throw error;
+        });
     };
     wrapped.__cacheoptWatch = true;
     window.fetch = wrapped;
@@ -500,6 +620,8 @@ function renderSettings() {
           <label class="checkbox_label"><input id="cacheopt_enabled" type="checkbox"> 启用缓存优化</label>
           <label class="checkbox_label"><input id="cacheopt_route" type="checkbox"> 世界书现场调整：关键词 / 会变的条目移到聊天中（不改文件）</label>
           <label class="checkbox_label"><input id="cacheopt_hoist" type="checkbox"> 固定规则条目前移进系统提示</label>
+          <label class="checkbox_label"><input id="cacheopt_shujuku" type="checkbox"> 数据库召回兼容：纪要、索引、表头和包裹移到当前历史之后</label>
+          <label class="checkbox_label"><input id="cacheopt_izumi" type="checkbox"> 泉记忆功能兼容（仅使用该功能时开启）</label>
           <label class="checkbox_label"><input id="cacheopt_sticky" type="checkbox"> 关键词设定放到聊天记录前并保持
             <input id="cacheopt_sticky_turns" class="text_pole cacheopt-num" type="number" min="1" max="50"> 条消息（场景稳定时更省，换场景那轮更贵；Gemini / Vertex 或开了提示词后处理时自动不生效）</label>
           <label class="checkbox_label"><input id="cacheopt_learn" type="checkbox"> 自动学习系统提示里的易变块</label>
@@ -507,14 +629,15 @@ function renderSettings() {
             <input id="cacheopt_keep" class="text_pole" type="text">
           </label>
           <div class="cacheopt-row">
-            <div id="cacheopt_check" class="menu_button">检查缓存稳定性（免费）</div>
+            <div id="cacheopt_check" class="menu_button">连续楼层测试说明（免费）</div>
             <div id="cacheopt_forget" class="menu_button">清空已学到的易变块</div>
           </div>
           <div id="cacheopt_learned" class="cacheopt-hint"></div>
           <div id="cacheopt_last" class="cacheopt-hint"></div>
-          <div id="cacheopt_report" class="cacheopt-report">点「检查缓存稳定性」查看两轮之间能命中缓存的比例。</div>
-          <div class="cacheopt-hint">真实发送对比（自动记录最近两次实际发出的请求）：</div>
+          <div id="cacheopt_report" class="cacheopt-report">正常聊天后查看下方两项：请求前缀文本相似度、API 实际缓存 token。</div>
+          <div class="cacheopt-hint">真实发送对比（同聊天、同模型的相邻正文请求，排除已标记的数据库辅助请求）：</div>
           <div id="cacheopt_real" class="cacheopt-report">同一聊天连续发送两次后显示。</div>
+          <div id="cacheopt_usage" class="cacheopt-report">API 缓存统计：尚未收到正文响应。没有返回统计时为未知。</div>
         </div>
       </div>
     </div>`;
@@ -522,6 +645,8 @@ function renderSettings() {
     $('#cacheopt_enabled').prop('checked', settings().enabled).on('input', function () { setEnabled(!!$(this).prop('checked')); });
     bindCheckbox('#cacheopt_route', 'routeWorldInfo');
     bindCheckbox('#cacheopt_hoist', 'hoistStatic');
+    bindCheckbox('#cacheopt_shujuku', 'compatShujuku');
+    bindCheckbox('#cacheopt_izumi', 'compatIzumi');
     bindCheckbox('#cacheopt_learn', 'learn');
     bindCheckbox('#cacheopt_sticky', 'stickyLore');
     $('#cacheopt_sticky_turns').val(settings().stickyTurns).on('change', function () {
@@ -533,14 +658,14 @@ function renderSettings() {
         settings().keepPatterns = String($(this).val());
         save();
     });
-    $('#cacheopt_check').on('click', () => checkStability().catch(e => $('#cacheopt_report').text(`检查失败：${e?.message || e}`)));
+    $('#cacheopt_check').on('click', checkStability);
     $('#cacheopt_forget').on('click', () => {
         settings().learnedHeads = [];
         save();
         renderLearned();
     });
     $('#cacheopt_last').text(lastRun);
-    if (settings().lastRealReport) $('#cacheopt_real').text(settings().lastRealReport);
+    // 不把旧版本的字符百分比或上次会话的 usage 当成本轮结果。
     renderLearned();
 
     // 魔法棒菜单（左下角）一键开关，结构与酒馆自带的菜单项一致
@@ -564,4 +689,5 @@ jQuery(() => {
         routeEntries([data?.globalLore, data?.characterLore, data?.chatLore, data?.personaLore]);
     });
     c.eventSource.on(c.eventTypes.CHAT_COMPLETION_PROMPT_READY, onPromptReady);
+    armFinalHook();
 });

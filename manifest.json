@@ -1,12 +1,12 @@
 {
   "display_name": "缓存优化 (Cache Optimizer)",
-  "homePage": "https://github.com/pzwtxdy831-commits/ST-Cache-Optimizer",
+  "homePage": "https://github.com/ecyasd/ST-Cache-Optimizer",
   "loading_order": 120,
   "requires": [],
   "optional": [],
   "js": "index.js",
   "css": "style.css",
   "author": "Claude (Anthropic)",
-  "version": "2.4.2",
+  "version": "2.5.0",
   "auto_update": false
 }

@@ -1,0 +1,118 @@
+{
+  "synthetic": true,
+  "schemaVersion": 1,
+  "description": "Izumi 1016 的最小脱敏兼容样本；正文、角色、记忆和用户输入均为人工构造，仅保留已审查的结构和标记形状。",
+  "provenance": {
+    "presetSourceFile": "Izumi 1016.json",
+    "presetReadOnly": true,
+    "embeddedScriptsExecuted": false,
+    "databaseRepository": "https://github.com/AlbusKen/shujuku.git",
+    "notAnApiCapture": true
+  },
+  "presetStructure": {
+    "promptCount": 232,
+    "enabledPromptCount": 61,
+    "characterId": 100001,
+    "enabledInChatInjectionCount": 0,
+    "orderIndexBase": 0,
+    "relevantSlots": [
+      { "order": 4, "id": "27a96df0-df6b-44ea-8bca-76881bf766be", "name": "初始化变量（别动）", "role": "system", "kind": "constant-setvar-macros", "injectionPosition": 0 },
+      { "order": 43, "id": "main", "name": "💾主提示", "role": "system", "kind": "static", "injectionPosition": 0 },
+      { "order": 44, "id": "ffa1f75e-9cfd-4c99-892a-ffe0b27f5945", "name": "接", "role": "assistant", "kind": "static-preset-dialogue", "injectionPosition": 0 },
+      { "order": 45, "id": "2d658683-d6f6-4c9f-a28c-bc2498cd2a43", "name": "创意加强1（会发癫）", "role": "system", "kind": "constant-setvar-macros", "injectionPosition": 0 },
+      { "order": 46, "id": "aaa05b4c-8335-46b2-a9c8-bd020be520bc", "name": "🔴指南（可改）", "role": "user", "kind": "static-preset-dialogue", "injectionPosition": 0 },
+      { "order": 47, "id": "c506bbc0-b84b-420e-aab2-4e936aecb11f", "name": "创意加强2（癫）", "role": "assistant", "kind": "static-preset-dialogue", "injectionPosition": 0 },
+      { "order": 116, "id": "personaDescription", "name": "用户设定描述", "role": "system", "kind": "persona-marker", "injectionPosition": 0 },
+      { "order": 118, "id": "charDescription", "name": "角色描述", "role": "system", "kind": "character-marker", "injectionPosition": 0 },
+      { "order": 119, "id": "worldInfoBefore", "name": "角色定义之前", "role": "system", "kind": "worldbook-marker", "injectionPosition": 0 },
+      { "order": 122, "id": "worldInfoAfter", "name": "角色定义之后", "role": "system", "kind": "worldbook-marker-with-possible-dynamic-memory", "injectionPosition": 0 },
+      { "order": 123, "id": "dialogueExamples", "name": "Chat Examples", "role": "system", "kind": "example-marker" },
+      { "order": 127, "id": "chatHistory", "name": "Chat History", "role": "system", "kind": "history-marker-expands-to-multiple-roles" },
+      { "order": 128, "id": "7f60f2a8-9e88-42e0-8c68-e908eb0365b8", "name": "👤扩写输入", "role": "system", "kind": "constant-setvar-macros", "injectionPosition": 0 },
+      { "order": 129, "id": "nsfw", "name": "信息结束", "role": "system", "kind": "dynamic-last-user-message-footer", "injectionPosition": 0 },
+      { "order": 130, "id": "f2bd9e18-e94f-401a-9fec-a96f03b72f6a", "name": "🌏Izumi世界系统", "role": "system", "kind": "dynamic-directory-and-token-count-footer", "injectionPosition": 0 },
+      { "order": 187, "id": "55fd17b5-5be5-47b9-98f2-fb09a96a165e", "name": "神秘", "role": "user", "kind": "static-preset-dialogue", "injectionPosition": 0 },
+      { "order": 188, "id": "d192c080-d5a7-43f4-bd56-ddc30ec6b282", "name": "神秘", "role": "assistant", "kind": "static-preset-dialogue", "injectionPosition": 0 },
+      { "order": 193, "id": "3beb259e-7516-41c9-8657-fd56cac8e628", "name": "argon/flash尾部1", "role": "user", "kind": "static-preset-footer", "injectionPosition": 0 }
+    ],
+    "disabledInChatExamples": [
+      { "order": 0, "id": "923770d6-10b5-4b28-ac0a-b5bc30fb3951", "name": "测试2", "role": "user", "enabled": false, "injectionPosition": 1, "injectionDepth": 0 },
+      { "order": 1, "id": "ef713ff7-992b-4195-b175-4b9614695d23", "name": "测试1", "role": "user", "enabled": false, "injectionPosition": 1, "injectionDepth": 2 }
+    ]
+  },
+  "embeddedHelper": {
+    "id": "7c19636a-77b4-4c18-b26b-673872cb8dcf",
+    "name": "泉此方悬浮窗",
+    "enabledInExport": true,
+    "scriptExecuted": false,
+    "eventSequence": [
+      "GENERATION_STARTED: advance turn epoch",
+      "GENERATION_AFTER_COMMANDS: prepare directory and memory",
+      "WORLDINFO_ENTRIES_LOADED: add native memory projection",
+      "CHAT_COMPLETION_PROMPT_READY: place directory; then optional Advice and sanitizer transforms",
+      "CHAT_COMPLETION_SETTINGS_READY: place directory; optional transforms; final exact-body authorization",
+      "GENERATE_AFTER_DATA: optional Advice and sanitizer transforms"
+    ],
+    "memoryNativeEntry": { "uid": 2147483000, "position": 1, "order": 999, "role": 0, "constant": true, "ignoreBudget": false },
+    "authorizationRequires": ["unchanged full memory body", "exactly one per-turn marker", "system message role", "unchanged directory body"],
+    "adviceDefaultEnabled": false,
+    "sanitizerDefaultEnabled": false,
+    "runtimeSettingsStoredOutsidePreset": true
+  },
+  "syntheticRequest": {
+    "staticPrefixMessages": [
+      { "role": "system", "content": "<task>固定预设任务。</task>" },
+      { "role": "assistant", "content": "固定预设接话。" },
+      { "role": "user", "content": "<narrative_config>固定叙事规则。</narrative_config>\n<Characterization_settings>固定角色规则。</Characterization_settings>" },
+      { "role": "assistant", "content": "固定预设确认。" },
+      { "role": "system", "content": "<Character_Description>测试角色：守塔人。</Character_Description>\n<WorldBook>固定世界书：塔在海边。</WorldBook>" }
+    ],
+    "earlyMemoryMessage": {
+      "role": "system",
+      "content": "<!-- IZM7_izumi_world_next_0123456789abcdef0123456789abcdef_1 -->\n<KonataExtraInformation>\n【测试记忆】\n角色曾在灯塔门前见过用户。\n</KonataExtraInformation>"
+    },
+    "historyMessages": [
+      { "role": "assistant", "content": "海风从灯塔窗外吹过。" },
+      { "role": "user", "content": "我推开门，询问今天的风向。" }
+    ],
+    "footerMessages": [
+      { "role": "system", "content": "</history>\n</Information>\n<Master_input>\n我推开门，询问今天的风向。\n</Master_input>\n<alternative_format>" },
+      { "role": "system", "content": "<customfunction>\n合成测试目录。\n当前总token：12345\n可整理的条目：\nIZW7_izumi_world_next_0123456789abcdef0123456789abcdef_1\n本聊天授权目录（允许新建资料）\n测试记忆 | 开启\n世界系统 | 仅可关闭自身\n</customfunction>" },
+      { "role": "user", "content": "固定预设尾部要求。" },
+      { "role": "assistant", "content": "固定预设尾部确认。" }
+    ]
+  },
+  "consecutiveTurns": [
+    { "epoch": 1, "tokenCount": 12345, "userInput": "我推开门，询问今天的风向。", "assistantReply": "守塔人指向海上的白帆。", "sameCharacterAndWorldbookAndPreset": true },
+    { "epoch": 2, "tokenCount": 12481, "userInput": "我把地图摊开，请他标出暗礁。", "assistantReply": "守塔人在地图东侧画了一个圈。", "sameCharacterAndWorldbookAndPreset": true },
+    { "epoch": 3, "tokenCount": 12627, "userInput": "我收起地图，提议等潮水退去再出发。", "assistantReply": "守塔人关上窗，取下一盏灯。", "sameCharacterAndWorldbookAndPreset": true }
+  ],
+  "shujuku": {
+    "pipeline": ["auxiliary model processes input and recalls summaries", "Vertex gemini-4-argon produces main response"],
+    "auxiliaryModelIsMainModel": false,
+    "recallMayChangeEveryTurn": true,
+    "allTablesNecessarilyUpdatedEveryTurn": false,
+    "entryNamePrefixPattern": "^ACU-\\[[^\\]]+\\]-",
+    "ownedBaseNamePrefixes": ["TavernDB-ACU-", "重要人物条目", "总结条目", "小总结条目"],
+    "excludedBaseNames": ["TavernDB-ACU-AgentGreenlight"],
+    "unmarkedExternalImportPrefix": "外部导入-",
+    "generatedWorldbookEntries": [
+      { "comment": "ACU-[synthetic-chat]-总结条目1", "constant": true, "content": "合成纪要：用户曾到访灯塔。" },
+      { "comment": "ACU-[synthetic-chat]-重要人物条目1", "constant": true, "content": "合成人物：守塔人。" }
+    ],
+    "customTableMessage": {
+      "role": "user",
+      "content": "<!-- ACU_CUSTOM_TABLE_EXPORT_V1 {\"version\":1,\"kind\":\"custom_table_export\",\"sheetKey\":\"synthetic-sheet\",\"tableName\":\"合成事件表\",\"entryName\":\"ACU-[synthetic-chat]-TavernDB-ACU-事件\",\"role\":\"main\"} -->\n<database>\n地点,事件\n灯塔,问风向\n</database>"
+    },
+    "customTableMarkerRoles": ["main", "row", "header", "wrapper_before", "wrapper_after", "index"],
+    "lateSettingsTransforms": ["db", "sql", "if", "random", "finalPrompts"],
+    "unsupportedInference": "辅助模型请求、主模型请求、重试和相同输入重复请求不能混为一组来计算连续楼层的前缀稳定性。"
+  },
+  "negativeControls": [
+    { "role": "system", "content": "普通说明提及 <KonataExtraInformation> 与 </KonataExtraInformation>；这不是脚本拥有的记忆正文。", "mustNotBeClaimedAsOwnedMemory": true },
+    { "role": "user", "content": "我在日记里写下 <advice>等潮退</advice>。", "mustRemainUserContent": true },
+    { "role": "assistant", "content": "角色读到了 <customfunction>旧目录</customfunction> 这几个字。", "mustRemainAssistantContent": true },
+    { "role": "assistant", "content": "固定预设伪对话，不能仅因角色是 assistant 就当作历史。", "mustPreserveRole": true }
+  ],
+  "validationBoundary": "本样本可验证不同输入、历史增长、早期记忆 epoch 变化和角色保真；不能证明真实 Google/Vertex/代理返回的缓存命中。"
+}
