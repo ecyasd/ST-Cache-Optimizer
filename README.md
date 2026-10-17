@@ -1,4 +1,4 @@
-# 缓存优化 · shujuku 连续楼层适配版（2.5.0）
+# 缓存优化 · shujuku 连续楼层适配版（2.5.1）
 
 用于 SillyTavern 对话补全的请求整理与缓存诊断。保持角色卡、固定世界书和预设的前部稳定，将本轮动态召回放在历史之后。只调整本次扫描或请求副本，不修改角色卡、世界书或预设文件。
 
@@ -12,7 +12,7 @@
 - 识别隔离前缀 `ACU-[…]-`、`TavernDB-ACU-CustomExport-纪要-*` 等内部名字，以及经过校验的 `ACU_CUSTOM_TABLE_EXPORT_V1` 元数据。普通外部导入资料不会仅因名字带“外部导入”被归为数据库快照。
 - 除 `CHAT_COMPLETION_PROMPT_READY` 外，在 `CHAT_COMPLETION_SETTINGS_READY` 再处理最终消息。每次生成重新排队，覆盖数据库后续模板展开及重建消息的通常路径。
 - 网络诊断排除数据库标记的内部辅助请求，按实际请求的模型、来源、接口和类型分组，只与同通道紧邻上一次请求比较。
-- 分别显示“请求前缀文本相似度”和“API 缓存 token”。支持 Vertex 原生流式 `usageMetadata.cachedContentTokenCount` 与 OpenAI 兼容统计；字段缺失显示“未知”，仅明确返回零时显示零。
+- 分别显示“请求前缀文本相似度”和“API 缓存 token”。支持 Vertex 原生流式 `usageMetadata.cachedContentTokenCount` 与 OpenAI 兼容统计；流式响应缺少 `Content-Type` 时也按请求的 `stream` 标记识别。字段缺失显示“未知”，仅明确返回零时显示零。
 - 删除截短当前聊天再模拟上一轮的检查。测试说明按钮不改聊天、不生成、不请求模型。
 
 ## 安装与设置

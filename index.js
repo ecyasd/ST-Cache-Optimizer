@@ -520,7 +520,8 @@ async function observeUsage(response, request) {
             const value = readUsage(payload);
             if (value) usage = { cached: value.cached ?? usage?.cached ?? null, total: value.total ?? usage?.total ?? null };
         };
-        if ((copy.headers.get('content-type') ?? '').includes('text/event-stream')) {
+        // 酒馆透传流式响应时可能没有 Content-Type；请求本身也能确认 SSE 模式。
+        if (request.body?.stream === true || (copy.headers.get('content-type') ?? '').includes('text/event-stream')) {
             const reader = copy.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';

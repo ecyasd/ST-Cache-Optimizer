@@ -343,6 +343,27 @@ test('SSE usage observer handles split frames while preserving the original resp
     assert.equal(await response.text(), wire);
 });
 
+test('a streaming request identifies SSE usage when SillyTavern omits Content-Type', async () => {
+    const h = harness({ chat: [{ is_user: true, mes: '无响应类型头的流式正文。' }] });
+    const request = h.call('recordRealRequest', JSON.stringify({
+        type: 'normal', model: 'gemini-4-argon', chat_completion_source: 'vertexai', stream: true,
+        messages: [{ role: 'user', content: '无响应类型头的流式正文。' }],
+    }));
+    const wire = `data: ${JSON.stringify(vertexSseChunk)}\n\ndata: [DONE]\n\n`;
+    const response = new Response(new ReadableStream({ start(controller) {
+        const bytes = new TextEncoder().encode(wire);
+        controller.enqueue(bytes.slice(0, 19));
+        controller.enqueue(bytes.slice(19));
+        controller.close();
+    } }));
+    assert.equal(response.headers.has('content-type'), false);
+    await h.call('observeUsage', response, request);
+    assert.match(h.call('settings').lastUsageReport, /8192/);
+    assert.match(h.call('settings').lastUsageReport, /12000/);
+    assert.equal(response.bodyUsed, false);
+    assert.equal(await response.text(), wire);
+});
+
 test('non-streaming usage observer reports unknown without consuming SillyTavern reply', async () => {
     const h = harness({ chat: [{ is_user: true, mes: '正文用户输入。' }] });
     const request = h.call('recordRealRequest', JSON.stringify({
