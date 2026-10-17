@@ -12,6 +12,7 @@ const DEFAULTS = Object.freeze({
     stickyTurns: 6,
     compatShujuku: true,
     compatIzumi: false,
+    compatGeminiProxy: false,
     volatileHeads: ['〔记忆系统私密简报'],
     learnedHeads: [],
     keepPatterns: 'output_format|Force_Structured|^<\\/?Format>|jailbreak|破限',
@@ -24,6 +25,7 @@ const STATIC_CLOSE = '</固定设定>';
 const STICKY_OPEN = '<近期剧情设定>';
 const STICKY_CLOSE = '</近期剧情设定>';
 const STICKY_ORDER_BASE = 2000000;
+const FIXED_SYSTEM_PLACEHOLDER = '【固定规则已置于系统指令】';
 // 比任何聊天记录都深：插在聊天记录最顶端
 // 酒馆只注入深度 0~10000（MAX_INJECTION_DEPTH），再大会被静默丢掉
 const TOP_DEPTH = 10000;
@@ -66,6 +68,16 @@ function isIzumiMemory(content) {
 
 let lastRun = '尚未发送过请求';
 let lastSystemBlocks = null;
+let nativeOpenAIModule = null;
+let processedHistorySnapshot = null;
+
+async function loadNativePromptManager() {
+    try {
+        // Read the host's finished messages; never run the user's regex or macros again.
+        // Keep the namespace: ST replaces this exported live binding after API changes.
+        nativeOpenAIModule = await import('/scripts/openai.js');
+    } catch { /* Older hosts keep the conservative raw-chat fallback. */ }
+}
 
 function ctx() {
     return SillyTavern.getContext();
@@ -261,11 +273,78 @@ function historySnippets() {
         });
 }
 
+function currentProcessedHistory() {
+    if (processedHistorySnapshot?.chatId !== ctx().getCurrentChatId()) processedHistorySnapshot = null;
+    return processedHistorySnapshot;
+}
+
+function processedHistoryText(message) {
+    const t = normalize(text(message)), c = ctx();
+    const names = [message.role === 'user' ? c.name1 : c.name2,
+        ...(c.chat ?? []).filter(raw => raw && (raw.is_user ? 'user' : 'assistant') === message.role).map(raw => raw.name)]
+        .filter(name => typeof name === 'string' && name.trim() && name.length <= 80 && !/[\r\n]/.test(name));
+    for (const name of names) {
+        const prefix = `${normalize(name)}: `;
+        if (t.startsWith(prefix)) return t.slice(prefix.length);
+    }
+    return t;
+}
+
+/** Numeric chatHistory identifiers also include depth injections in ST.
+ * Only complete equality with a same-role real message proves this additional path.
+ * Partial raw substrings are still ambiguous: depth injections can quote real chat.
+ */
+function hasRawHistoryWitness(message) {
+    const t = processedHistoryText(message);
+    if (!t) return false;
+    return (ctx().chat ?? []).some(raw => {
+        if (!raw || raw.is_system || typeof raw.mes !== 'string'
+            || (raw.is_user ? 'user' : 'assistant') !== message.role) return false;
+        const source = normalize(raw.mes);
+        return source === t;
+    });
+}
+
+function captureProcessedHistory(manager, chat) {
+    processedHistorySnapshot = null;
+    if (!Array.isArray(chat)) return;
+    try {
+        const collections = manager?.messages?.getCollection?.();
+        const history = collections?.find(collection => collection?.identifier === 'chatHistory');
+        const messages = history?.getCollection?.();
+        if (!Array.isArray(messages)) return;
+        const entries = messages.filter(message => /^chatHistory-\d+$/.test(message?.identifier)
+            && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string'
+            && hasRawHistoryWitness(message)
+            && chat.some(candidate => candidate.role === message.role && normalize(text(candidate)) === normalize(message.content)))
+            .map(message => ({ role: message.role, content: message.content }));
+        if (entries.length) processedHistorySnapshot = { chatId: ctx().getCurrentChatId(), entries };
+    } catch { /* Unrecognized host collection shapes are not guessed. */ }
+}
+
+function matchesHistoryText(message, item) {
+    if (message.role !== item.role) return false;
+    const t = processedHistoryText(message), expected = processedHistoryText(item);
+    if (!t || !expected) return false;
+    // Late rebuilding must retain the complete processed message. Quoted anchors
+    // in a worldbook injection do not make that injection a history message.
+    return t === expected;
+}
+
 /**
  * 找出提示词里真正的聊天记录范围。很多预设在聊天记录前放伪造的 user/assistant 对话、规则和资料，
  * 不能把「第一条非 system 消息」当成聊天记录的开头，所以拿真实聊天消息逐条比对。
  */
 function findHistoryRange(chat) {
+    const snapshot = currentProcessedHistory();
+    if (snapshot) {
+        const positions = snapshot.entries.flatMap(item => {
+            const matching = chat.map((message, i) => matchesHistoryText(message, item) ? i : -1).filter(i => i >= 0);
+            // Identical preset demonstrations cannot expand the actual history boundary.
+            return matching.length === 1 ? matching : [];
+        });
+        return positions.length ? { start: Math.min(...positions), end: Math.max(...positions) } : null;
+    }
     const snippets = historySnippets();
     if (!snippets.length) return null;
     let start = -1, end = -1;
@@ -383,6 +462,7 @@ function learnFrom(chat) {
 
 function onPromptReady(data) {
     armFinalHook();
+    captureProcessedHistory(nativeOpenAIModule?.promptManager, data?.chat);
     if (!settings().enabled || !Array.isArray(data?.chat)) return;
     splitKnownDynamicBlocks(data.chat);
     const n = reorder(data.chat);
@@ -437,6 +517,82 @@ const RECENT_LIMIT = 8;
 const ACU_INTERNAL = Symbol.for('acu.internal-generation-fetch');
 // 仅在同聊天、同来源/模型/请求类型内，对比紧邻上次请求，避免重复请求美化连续楼层结果。
 let recentReal = [];
+
+/** Opt-in transport compatibility, after auxiliary attribution is available.
+ * Text order inside each original message is unchanged; system priority/order does change.
+ * This is not an explicit provider cache and does not imply a token hit rate.
+ */
+function applyGeminiProxyLayout(body) {
+    const skip = reason => ({ applied: false, reason });
+    if (!settings().enabled || !settings().compatGeminiProxy) return skip('disabled');
+    if (body?.type !== 'normal' || body?.[ACU_INTERNAL]) return skip('non-main');
+    if (!['custom', 'vertexai', 'makersuite'].includes(body.chat_completion_source)
+        || !/gemini/i.test(String(body.model ?? ''))) return skip('connection');
+    if (!Array.isArray(body.messages)) return skip('messages');
+    if (['tools', 'functions'].some(key => body[key] != null && (!Array.isArray(body[key]) || body[key].length))
+        || ['tool_choice', 'function_call', 'response_format', 'json_schema'].some(key => body[key] != null)) return skip('tools-or-schema');
+    if (body.messages.some(message => !message || typeof message.content !== 'string'
+        || !['system', 'user', 'assistant'].includes(message.role)
+        || Object.keys(message).some(key => !['role', 'content'].includes(key)
+            && !(key === 'signature' && ['user', 'assistant'].includes(message.role) && typeof message.signature === 'string')))) return skip('message-metadata');
+    if (body.messages.some(message => /\bIZ[MW]7_/i.test(message.content))) return skip('memory-authorization');
+    const range = findHistoryRange(body.messages);
+    if (!range) return skip('unconfirmed-history');
+    const fixed = [], remaining = [];
+    let convertedSystems = 0, fixedPlaceholders = 0;
+    for (let i = 0; i < body.messages.length; i++) {
+        const message = body.messages[i];
+        if (message.role !== 'system') { remaining.push(message); continue; }
+        if (i < range.start) {
+            const t = message.content.trimStart();
+            if (isVolatileHead(headOf(message)) || t.startsWith(WRAP_OPEN)
+                || isDynamicContent({ content: message.content })
+                || /^<(?:最新数据与记录|过往记忆|剧情大纲编码索引|status_current_variables?)>/.test(t)) return skip('dynamic-before-history');
+            fixed.push(message);
+            if (i > 0) {
+                // Keep a real user boundary where native Google would convert this
+                // system block. Otherwise adjacent signed model turns can be merged.
+                remaining.push({ role: 'user', content: FIXED_SYSTEM_PLACEHOLDER });
+                fixedPlaceholders++;
+            }
+        } else {
+            // The normal router first places injections after the last actual history turn.
+            // If an unrecognized layout still has interleaved system messages, leave it alone.
+            if (i <= range.end) return skip('interleaved-system');
+            remaining.push({ ...message, role: 'user' });
+            convertedSystems++;
+        }
+    }
+    if (!fixed.length) return skip('no-fixed-system');
+    const content = fixed.map(message => message.content).join('\n\n');
+    body.messages = [{ role: 'system', content }, ...remaining];
+    return { applied: true, mergedSystems: fixed.length, fixedHeadChars: content.length, convertedSystems, fixedPlaceholders };
+}
+
+function describeGeminiLayout(report) {
+    return report.applied
+        ? `Gemini / Vertex 固定头强化：${report.mergedSystems} 条 system 集中为固定头 ${report.fixedHeadChars.toLocaleString()} 字，原位保留 ${report.fixedPlaceholders} 个固定标记，后部 ${report.convertedSystems} 条 system 转为 user（角色和规则顺序已调整；非缓存命中率）`
+        : `Gemini / Vertex 固定头强化：本次保守跳过（${report.reason}）`;
+}
+
+function requestInitWithBody(init, body) {
+    const forwarded = Object.create(null), seen = new Set(['body']);
+    // Preserve dictionary members without rebinding class/private-field getters
+    // to a child object. Only fetch's actual property reads invoke these getters.
+    for (let owner = init; owner; owner = Object.getPrototypeOf(owner)) {
+        for (const key of Reflect.ownKeys(owner)) {
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const descriptor = Object.getOwnPropertyDescriptor(owner, key);
+            Object.defineProperty(forwarded, key, {
+                configurable: true, enumerable: descriptor?.enumerable ?? false,
+                get: () => Reflect.get(init, key, init),
+            });
+        }
+    }
+    Object.defineProperty(forwarded, 'body', { value: body, enumerable: true, configurable: true, writable: true });
+    return forwarded;
+}
 
 function messageTexts(body) {
     return (Array.isArray(body.messages) ? body.messages : []).map(m => JSON.stringify(m));
@@ -511,14 +667,31 @@ function readUsage(payload) {
     return cached === null && total === null ? null : { cached, total };
 }
 
+function identifiedUsageFields(payload) {
+    const prefix = ['usageMetadata', 'usage_metadata', 'usage'].find(key => payload?.[key] != null);
+    if (!prefix) return [];
+    const fields = [
+        'cachedContentTokenCount', 'cached_content_token_count',
+        'prompt_tokens_details.cached_tokens', 'input_tokens_details.cached_tokens',
+        'cache_read_input_tokens', 'total_cached_tokens',
+    ];
+    return fields.map(field => `${prefix}.${field}`).flatMap(path => {
+        const value = path.split('.').reduce((object, key) => object?.[key], payload);
+        return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? [`${path} = ${value}`] : [];
+    });
+}
+
 async function observeUsage(response, request) {
     if (!request || !response.ok) return;
     let usage = null;
+    let cacheFields = [];
     try {
         const copy = response.clone();
         const accept = payload => {
             const value = readUsage(payload);
             if (value) usage = { cached: value.cached ?? usage?.cached ?? null, total: value.total ?? usage?.total ?? null };
+            const fields = identifiedUsageFields(payload);
+            if (fields.length) cacheFields = fields;
         };
         // 酒馆透传流式响应时可能没有 Content-Type；请求本身也能确认 SSE 模式。
         if (request.body?.stream === true || (copy.headers.get('content-type') ?? '').includes('text/event-stream')) {
@@ -553,6 +726,7 @@ async function observeUsage(response, request) {
     settings().lastUsageReport = report;
     save();
     $('#cacheopt_usage').text(report);
+    $('#cacheopt_usage').attr('title', cacheFields.length ? cacheFields.join('\n') : '响应未返回已识别的缓存数字字段');
 }
 
 function recordRequestFailure(request) {
@@ -569,12 +743,25 @@ function watchRealRequests() {
     if (original.__cacheoptWatch) return;
     const wrapped = function (input, init) {
         let request = null;
+        let forwardedInit = init;
         try {
             const url = typeof input === 'string' ? input : input?.url;
             // 数据库已公开的内存标记；辅助模型处理输入/召回，不纳入正文统计。
-            if (!init?.[ACU_INTERNAL] && url && url.includes(GENERATE_PATH) && typeof init?.body === 'string') request = recordRealRequest(init.body);
+            if (!init?.[ACU_INTERNAL] && url && url.includes(GENERATE_PATH) && typeof init?.body === 'string') {
+                let rawBody = init.body;
+                if (settings().enabled && settings().compatGeminiProxy) {
+                    const body = JSON.parse(rawBody);
+                    const report = applyGeminiProxyLayout(body);
+                    if (report.applied) {
+                        rawBody = JSON.stringify(body);
+                        forwardedInit = requestInitWithBody(init, rawBody);
+                    }
+                    $('#cacheopt_last').text(`${lastRun}\n${describeGeminiLayout(report)}`);
+                }
+                request = recordRealRequest(rawBody);
+            }
         } catch { /* 只旁观，出错不影响请求 */ }
-        return original.apply(this, arguments).then(response => {
+        return original.call(this, input, forwardedInit).then(response => {
             if (!response.ok) recordRequestFailure(request);
             else if (request) void observeUsage(response, request);
             return response;
@@ -623,6 +810,8 @@ function renderSettings() {
           <label class="checkbox_label"><input id="cacheopt_hoist" type="checkbox"> 固定规则条目前移进系统提示</label>
           <label class="checkbox_label"><input id="cacheopt_shujuku" type="checkbox"> 数据库召回兼容：纪要、索引、表头和包裹移到当前历史之后</label>
           <label class="checkbox_label"><input id="cacheopt_izumi" type="checkbox"> 泉记忆功能兼容（仅使用该功能时开启）</label>
+          <label class="checkbox_label"><input id="cacheopt_gemini_proxy" type="checkbox"> Gemini / Vertex 固定头强化（实验）：固定规则集中到开头，动态资料留在后部</label>
+          <div class="cacheopt-hint">用于自定义、Vertex 或 Google 接口的 Gemini 正文请求。会合并固定 system 并调整规则顺序，原位留下固定 user 标记，将后部 system 资料原位转为 user；可能影响预设服从程度。默认关闭，实际收益以 API 缓存 token 为准。</div>
           <label class="checkbox_label"><input id="cacheopt_sticky" type="checkbox"> 关键词设定放到聊天记录前并保持
             <input id="cacheopt_sticky_turns" class="text_pole cacheopt-num" type="number" min="1" max="50"> 条消息（场景稳定时更省，换场景那轮更贵；Gemini / Vertex 或开了提示词后处理时自动不生效）</label>
           <label class="checkbox_label"><input id="cacheopt_learn" type="checkbox"> 自动学习系统提示里的易变块</label>
@@ -648,6 +837,7 @@ function renderSettings() {
     bindCheckbox('#cacheopt_hoist', 'hoistStatic');
     bindCheckbox('#cacheopt_shujuku', 'compatShujuku');
     bindCheckbox('#cacheopt_izumi', 'compatIzumi');
+    bindCheckbox('#cacheopt_gemini_proxy', 'compatGeminiProxy');
     bindCheckbox('#cacheopt_learn', 'learn');
     bindCheckbox('#cacheopt_sticky', 'stickyLore');
     $('#cacheopt_sticky_turns').val(settings().stickyTurns).on('change', function () {
@@ -683,6 +873,7 @@ function renderSettings() {
 
 jQuery(() => {
     settings();
+    void loadNativePromptManager();
     renderSettings();
     watchRealRequests();
     const c = ctx();
