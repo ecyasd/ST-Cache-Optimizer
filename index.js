@@ -468,7 +468,7 @@ function describeReal(prev, cur, gapSec) {
         k < b.length ? `　上次：${show(a[k] ?? '（无）')}` : '',
         k < b.length ? `　这次：${show(b[k])}` : '',
         toolSchema(prev.body) !== toolSchema(cur.body) ? '⚠ 工具定义发生变化（包括参数 schema），需结合 API 缓存统计判断影响' : '',
-        '观察阶段：浏览器发往酒馆的最终请求；酒馆后端还会转换为 Vertex 格式。',
+        '观察阶段：浏览器发往酒馆的最终请求；酒馆后端仍可能合并消息或转换格式，最终发送内容以后台为准。',
     ].filter(Boolean).join('\n');
 }
 
