@@ -33,7 +33,7 @@ function harness(overrides = {}) {
         Response,
         ReadableStream,
         AbortController,
-        window: { fetch: async () => new Response('{}') },
+        window: { fetch: async () => new Response('{}'), location: { href: 'http://127.0.0.1:8000/', origin: 'http://127.0.0.1:8000' } },
         jQuery: jquery,
         $: jquery,
         toastr: { info() {}, warning() {}, error() {} },
@@ -186,6 +186,98 @@ test('database compatibility defaults on and optional Izumi memory defaults off'
     assert.deepEqual(plain(settings.learnedHeads), ['saved head']);
 });
 
+test('unchanged system blocks sharing a head are never learned as volatile', () => {
+    const user = '我从城门继续往前走。';
+    const h = harness({ chat: [{ is_user: true, mes: user }] });
+    const messages = [
+        { role: 'system', content: '共同规则标题\n第一条固定规则。' },
+        { role: 'system', content: '共同规则标题\n第二条固定规则。' },
+        { role: 'user', content: user },
+    ];
+    for (let turn = 0; turn < 4; turn++) h.call('learnFrom', messages);
+    assert.deepEqual(plain(h.call('learnedHeadsForScope')), []);
+    assert.equal(h.call('reorder', messages), 0);
+});
+
+test('learning confidence is isolated by chat and still learns two real changes', () => {
+    let chatId = 'first-chat';
+    const user = '我核对城门旁的路牌。';
+    const h = harness({ getCurrentChatId: () => chatId, chat: [{ is_user: true, mes: user }] });
+    const messages = value => [{ role: 'system', content: `实时位置说明\n${value}` }, { role: 'user', content: user }];
+    h.call('learnFrom', messages('城门'));
+    h.call('learnFrom', messages('街道'));
+    chatId = 'second-chat';
+    h.call('learnFrom', messages('码头'));
+    h.call('learnFrom', messages('船舱'));
+    assert.deepEqual(plain(h.call('learnedHeadsForScope')), []);
+    h.call('learnFrom', messages('甲板'));
+    assert.deepEqual(plain(h.call('learnedHeadsForScope')), ['实时位置说明']);
+});
+
+test('forgetting learned heads also resets prior blocks and confidence', () => {
+    const user = '我继续查看街上的行人。';
+    const h = harness({ chat: [{ is_user: true, mes: user }] });
+    const messages = value => [{ role: 'system', content: `实时位置说明\n${value}` }, { role: 'user', content: user }];
+    for (const value of ['城门', '街道', '广场']) h.call('learnFrom', messages(value));
+    assert.deepEqual(plain(h.call('learnedHeadsForScope')), ['实时位置说明']);
+    h.call('forgetLearned');
+    h.call('learnFrom', messages('桥头'));
+    h.call('learnFrom', messages('河岸'));
+    assert.deepEqual(plain(h.call('learnedHeadsForScope')), []);
+    h.call('learnFrom', messages('渡口'));
+    assert.deepEqual(plain(h.call('learnedHeadsForScope')), ['实时位置说明']);
+});
+
+test('activated top-depth lore stays protected without scan wrappers', () => {
+    const user = '我查看眼前的景象。';
+    const h = harness({ chat: [{ is_user: true, mes: user }], extensionPrompts: {} });
+    for (const scene of ['城门', '街道', '码头', '河岸']) {
+        const content = `当前场景设定\n${scene}`;
+        h.host.extensionPrompts.customDepthWI_10000_0 = { value: content, depth: 10000, role: 0, position: 1 };
+        const messages = [{ role: 'system', content }, { role: 'user', content: user }];
+        assert.equal(h.call('isTopBlock', messages[0]), true);
+        h.call('learnFrom', messages);
+        assert.equal(h.call('reorder', messages), 0);
+    }
+    assert.deepEqual(plain(h.call('learnedHeadsForScope')), []);
+    assert.equal(h.call('isTopBlock', { role: 'system', content: '当前场景设定\n河岸\n另一段本轮变化信息。' }), false);
+    assert.equal(h.call('isTopBlock', { role: 'user', content: '当前场景设定\n河岸' }), false);
+});
+
+test('learned heads are isolated by character and chat and legacy global heads stay inactive', () => {
+    const user = '我核对眼前的路牌。';
+    let chatId = 'same-chat-name';
+    const h = harness({ characterId: 0, characters: [{ avatar: 'card-a.png' }, { avatar: 'card-b.png' }],
+        getCurrentChatId: () => chatId, chat: [{ is_user: true, mes: user }],
+        extensionSettings: { cacheOptimizer: { learnedHeads: ['旧版全局标题'] } } });
+    const messages = value => [{ role: 'system', content: `实时位置说明\n${value}` }, { role: 'user', content: user }];
+    for (const value of ['城门', '街道', '广场']) h.call('learnFrom', messages(value));
+    assert.equal(h.call('isVolatileHead', '实时位置说明'), true);
+    assert.equal(h.call('isVolatileHead', '实时位置说明：固定输出要求'), false);
+    assert.equal(h.call('isVolatileHead', '旧版全局标题'), false);
+    h.host.characterId = 1;
+    assert.equal(h.call('isVolatileHead', '实时位置说明'), false);
+    assert.equal(h.call('reorder', messages('固定设定')), 0);
+    h.host.characterId = 0;
+    chatId = 'another-chat';
+    assert.equal(h.call('isVolatileHead', '实时位置说明'), false);
+    chatId = 'same-chat-name';
+    assert.equal(h.call('isVolatileHead', '实时位置说明'), true);
+});
+
+test('automatic learning records expire and the retained scope count is bounded', () => {
+    let chatId = 'scope-0';
+    const h = harness({ getCurrentChatId: () => chatId });
+    h.call('rememberLearnedHeads', ['合成测试标题']);
+    assert.equal(h.call('isVolatileHead', '合成测试标题'), true);
+    h.evaluate('settings().learnedByScope[learningScopeKey()].updatedAt = Date.now() - LEARNED_TTL - 1');
+    assert.equal(h.call('isVolatileHead', '合成测试标题'), false);
+    for (let i = 1; i <= 55; i++) { chatId = `scope-${i}`; h.call('rememberLearnedHeads', ['合成测试标题']); }
+    assert.equal(h.evaluate('Object.keys(settings().learnedByScope).length'), 50);
+    h.call('forgetLearned');
+    assert.equal(h.evaluate('Object.keys(settings().learnedByScope).length'), 0);
+});
+
 test('database constant activation does not imply immutable table content', () => {
     const h = harness();
     const entry = {
@@ -231,7 +323,12 @@ const nativeHistoryManager = (entries, otherCollections = []) => ({ messages: { 
     { identifier: 'chatHistory', getCollection: () => entries },
 ] } });
 
-test('finished host history keeps exact chat provenance and declines unproven regex-filtered narrative', () => {
+function beginMainGeneration(h, core = h.host.chat) {
+    h.call('onGenerationStarted', 'normal', {}, false);
+    h.call('captureGenerationHistory', core, 100000, () => {}, 'normal');
+}
+
+test('official processed history confirms regex-filtered narrative while excluding depth injections', () => {
     const narrative = '<content>旅客向站务员问路，站务员指向东边的月台，提醒他带好行李，下一班列车将在午后开出。候车室里传来检票广播，靠窗的位置还有几张空椅子，门口的时钟指着正午时分。</content>';
     const user = '我沿着站务员指示的小路走向月台，准备确认车票上的出发时间，并看看有没有临时变更。';
     const html = `<html><style>${'large-render-only-css '.repeat(900)}</style></html>`;
@@ -260,21 +357,23 @@ test('finished host history keeps exact chat provenance and declines unproven re
         { identifier: 'chatHistory-999', role: 'assistant', content: fakeAssistant },
     ] }]));
     const raw = structuredClone(h.host.chat);
+    beginMainGeneration(h, [{ is_user: false, mes: narrative }, { is_user: true, mes: user }]);
     const data = { chat: structuredClone(prepared), dryRun: false };
     h.call('onPromptReady', data);
     assert.deepEqual(plain(h.evaluate('processedHistorySnapshot.entries')), [
+        { role: 'assistant', content: narrative },
         { role: 'user', content: user },
     ]);
     // A late template extension can rebuild the array, losing all object identity.
     const final = { type: 'normal', messages: structuredClone(prepared) };
     h.call('onSettingsReady', final);
-    assert.deepEqual(plain(h.call('findHistoryRange', final.messages)), { start: 5, end: 5 });
+    assert.deepEqual(plain(h.call('findHistoryRange', final.messages)), { start: 4, end: 5 });
     assert.equal(final.messages.at(-1).content, injection);
     assert.equal(final.messages[3].content, injectedUser);
     assert.deepEqual(h.host.chat, raw);
 });
 
-test('processed history snapshots never replace an existing legacy range and clear when chats change', () => {
+test('ambiguous duplicate history does not expand the boundary and clears when chats change', () => {
     let chatId = 'first-chat';
     const actual = '这一段曾经实际发生，但固定示范也完整重复了这一句话。';
     const latest = '这是唯一的当前用户输入，用于确定最后一个真实楼层。';
@@ -285,18 +384,19 @@ test('processed history snapshots never replace an existing legacy range and cle
         { role: 'assistant', content: actual }, { role: 'system', content: rolePreset },
         { role: 'assistant', content: actual }, { role: 'user', content: latest },
     ];
+    beginMainGeneration(h);
     h.call('captureProcessedHistory', nativeHistoryManager([
         { identifier: 'chatHistory-1', role: 'assistant', content: actual },
         { identifier: 'chatHistory-2', role: 'user', content: latest },
     ]), messages);
-    assert.deepEqual(plain(h.call('findHistoryRange', messages)), { start: 0, end: 3 });
+    assert.equal(h.call('findHistoryRange', messages), null);
     chatId = 'second-chat';
     h.host.chat = [{ is_user: true, mes: '另一个聊天中的新输入。' }];
     assert.equal(h.call('findHistoryRange', messages), null);
     assert.equal(h.evaluate('processedHistorySnapshot'), null);
 });
 
-test('a current-user-only snapshot cannot hoist runtime systems across confirmed assistant history', () => {
+test('processed assistant provenance keeps runtime systems outside the fixed head', () => {
     const narrative = '站务员向旅客说明下一班车的发车时刻，并指着墙上的时刻表让他核对票面上的站台号码。'.repeat(6);
     const user = '我核对票面上的号码后，继续询问月台在哪里。';
     const runtime = '实际位置：这是运行时资料，应当照常随剧情变化，不能因为仅识别当前用户就被当成固定头。';
@@ -314,9 +414,12 @@ test('a current-user-only snapshot cannot hoist runtime systems across confirmed
         { identifier: 'chatHistory-2', role: 'user', content: user },
     ]));
     h.call('settings').compatGeminiProxy = true;
+    beginMainGeneration(h, [{ is_user: false, mes: narrative }, { is_user: true, mes: user }]);
     const data = { chat: structuredClone(prepared), dryRun: false };
     h.call('onPromptReady', data);
-    assert.equal(h.evaluate('processedHistorySnapshot.entries.length'), 1);
+    assert.equal(h.evaluate('processedHistorySnapshot.entries.length'), 2);
+    assert.deepEqual(data.chat, prepared, 'PROMPT_READY only observes provenance');
+    h.call('onSettingsReady', { type: 'normal', messages: data.chat });
     assert.deepEqual(plain(h.call('findHistoryRange', data.chat)), { start: 3, end: 4 });
     assert.equal(data.chat.at(-1).content, runtime);
     const body = { type: 'normal', chat_completion_source: 'vertexai', model: 'gemini-3.1-flash-lite', messages: data.chat };
@@ -326,17 +429,18 @@ test('a current-user-only snapshot cannot hoist runtime systems across confirmed
     assert.equal(body.messages.at(-1).content, runtime);
 });
 
-test('snapshot fallback requires unique complete assistant and user matches when raw history is unavailable', () => {
+test('processed history keeps complete ordered assistant and user witnesses when raw text changes', () => {
     const assistant = '这是当时的实际助手回答，用于建立完整来源的快照。';
     const user = '这是当时的实际用户输入，用于建立完整来源的快照。';
     const h = harness({ chat: [{ is_user: false, mes: assistant }, { is_user: true, mes: user }] });
     const messages = [{ role: 'assistant', content: assistant }, { role: 'user', content: user }];
+    beginMainGeneration(h);
     h.call('captureProcessedHistory', nativeHistoryManager(messages.map((m, i) => ({ ...m, identifier: `chatHistory-${i}` }))), messages);
     h.host.chat = [{ is_user: true, mes: '宿主随后变更的文本不能与旧快照匹配。' }];
     assert.equal(h.call('findRawHistoryRange', messages), null);
     assert.deepEqual(plain(h.call('findHistoryRange', messages)), { start: 0, end: 1 });
     assert.equal(h.call('findHistoryRange', [{ role: 'user', content: user }]), null);
-    assert.equal(h.call('findHistoryRange', [...messages, { role: 'assistant', content: assistant }]), null);
+    assert.deepEqual(plain(h.call('findHistoryRange', [...messages, { role: 'assistant', content: assistant }])), { start: 0, end: 1 });
 });
 
 test('a depth injection quoting one span cannot become a processed history witness', () => {
@@ -370,6 +474,7 @@ test('a depth injection quoting two real spans plus its own rules cannot move fi
         { identifier: 'chatHistory-2', role: 'assistant', content: rawAssistant },
         { identifier: 'chatHistory-1', role: 'user', content: user },
     ]));
+    beginMainGeneration(h);
     const data = { chat: structuredClone(prepared), dryRun: false };
     h.call('onPromptReady', data);
     assert.deepEqual(plain(h.call('findHistoryRange', data.chat)), { start: 3, end: 4 });
@@ -392,6 +497,7 @@ test('a depth injection containing only a raw substring cannot expand the proces
         { identifier: 'chatHistory-2', role: 'assistant', content: rawAssistant },
         { identifier: 'chatHistory-1', role: 'user', content: user },
     ]));
+    beginMainGeneration(h);
     const data = { chat: structuredClone(prepared), dryRun: false };
     h.call('onPromptReady', data);
     assert.deepEqual(plain(h.call('findHistoryRange', data.chat)), { start: 3, end: 4 });
@@ -414,13 +520,16 @@ test('processed history uses the current exported promptManager after host initi
     const h = harness({ chat: [{ is_user: false, mes: first }] });
     const module = { promptManager: null };
     h.setOpenAIModule(module);
+    beginMainGeneration(h);
     h.call('onPromptReady', { chat: [{ role: 'assistant', content: first }], dryRun: false });
-    assert.equal(h.evaluate('processedHistorySnapshot'), null);
+    assert.equal(h.evaluate('processedHistorySnapshot.entries.length'), 0);
     module.promptManager = nativeHistoryManager([{ identifier: 'chatHistory-1', role: 'assistant', content: first }]);
+    beginMainGeneration(h);
     h.call('onPromptReady', { chat: [{ role: 'assistant', content: first }], dryRun: false });
     assert.equal(h.evaluate('processedHistorySnapshot.entries[0].content'), first);
     h.host.chat = [{ is_user: false, mes: second }];
     module.promptManager = nativeHistoryManager([{ identifier: 'chatHistory-1', role: 'assistant', content: second }]);
+    beginMainGeneration(h);
     h.call('onPromptReady', { chat: [{ role: 'assistant', content: second }], dryRun: false });
     assert.equal(h.evaluate('processedHistorySnapshot.entries[0].content'), second);
 });
@@ -697,6 +806,9 @@ test('three advancing turns keep fixed preset and history before changing memory
         data.messages = [
             ...data.messages.slice(0, 3), { role: 'system', content: recall }, ...data.messages.slice(3),
         ];
+        beginMainGeneration(h);
+        h.setPromptManager(nativeHistoryManager(histories.map((message, i) => ({ ...message, identifier: `chatHistory-${i}` }))));
+        h.call('onPromptReady', { chat: histories.map(message => ({ ...message })), dryRun: false });
         h.call('onSettingsReady', data);
         const messages = data.messages;
         const latestUserIndex = messages.findIndex(m => m.content === inputs[turn]);
@@ -733,6 +845,9 @@ test('ambiguous database wrappers and user-authored wrappers are preserved verba
         { role: 'user', content: userAuthored },
         { role: 'user', content: '这是真实用户的新一轮输入。' },
     ] };
+    beginMainGeneration(h);
+    h.setPromptManager(nativeHistoryManager([{ identifier: 'chatHistory-0', role: 'user', content: '这是真实用户的新一轮输入。' }]));
+    h.call('onPromptReady', { chat: data.messages.map(message => ({ ...message })), dryRun: false });
     h.call('onSettingsReady', data);
     assert.ok(data.messages.some(m => m.role === 'system' && m.content === ambiguous));
     assert.ok(data.messages.some(m => m.role === 'user' && m.content === userAuthored));
@@ -774,6 +889,8 @@ test('the final hook is rearmed behind a database listener loaded later', async 
     eventSource.on('settings', data => {
         data.messages = [{ role: 'system', content: `${rolePreset}\n${recall}` }, { role: 'user', content: userText }];
     });
+    beginMainGeneration(h);
+    h.setPromptManager(nativeHistoryManager([{ identifier: 'chatHistory-0', role: 'user', content: userText }]));
     h.call('onPromptReady', { chat: [{ role: 'user', content: userText }], dryRun: false });
     const data = { type: 'normal', messages: [] };
     await eventSource.emit(data);
@@ -1002,6 +1119,9 @@ test('a short user turn cannot match preset explanations or the same assistant w
     ];
     assert.deepEqual(plain(h.call('findHistoryRange', messages)), { start: 4, end: 4 });
     const original = structuredClone(messages);
+    beginMainGeneration(h);
+    h.setPromptManager(nativeHistoryManager([{ identifier: 'chatHistory-0', role: 'user', content: '继续' }]));
+    h.call('onPromptReady', { chat: messages.map(message => ({ ...message })), dryRun: false });
     h.call('onSettingsReady', { type: 'normal', messages });
     assert.deepEqual(messages, original);
 

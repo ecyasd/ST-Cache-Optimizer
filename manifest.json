@@ -2,11 +2,12 @@
   "display_name": "缓存优化 (Cache Optimizer)",
   "homePage": "https://github.com/ecyasd/ST-Cache-Optimizer",
   "loading_order": 120,
+  "generate_interceptor": "cacheOptimizerCaptureHistory",
   "requires": [],
   "optional": [],
   "js": "index.js",
   "css": "style.css",
   "author": "Claude (Anthropic)",
-  "version": "2.6.2",
+  "version": "2.6.3",
   "auto_update": false
 }

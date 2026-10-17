@@ -1,4 +1,4 @@
-// 缓存优化 v2.5：按来源路由数据库召回，在 SETTINGS_READY 再处理最终消息。
+// 缓存优化 v2.6.3：按来源路由数据库召回，在 SETTINGS_READY 再处理最终消息。
 // 仅修改本轮扫描/请求副本；请求相似度和服务端缓存 token 分开报告。
 // 相同前缀能提高隐式缓存机会，但实际命中以 API 响应为准。
 
@@ -15,6 +15,7 @@ const DEFAULTS = Object.freeze({
     compatGeminiProxy: false,
     volatileHeads: ['〔记忆系统私密简报'],
     learnedHeads: [],
+    learnedByScope: {},
     keepPatterns: 'output_format|Force_Structured|^<\\/?Format>|jailbreak|破限',
 });
 const WRAP_OPEN = '<当前剧情相关设定>';
@@ -33,6 +34,8 @@ const POS = { before: 0, after: 1, anTop: 2, anBottom: 3, atDepth: 4, emTop: 5, 
 const ROLE_SYSTEM = 0;
 const HOIST_ORDER_BASE = 100000;
 const MAX_LEARNED = 30;
+const MAX_LEARNING_SCOPES = 50;
+const LEARNED_TTL = 30 * 24 * 60 * 60 * 1000;
 const MAX_LEARN_CHARS = 20000;
 const changeCounts = new Map();
 // constant 只代表常驻激活，不代表条目正文不会被其他扩展更新。
@@ -70,12 +73,45 @@ let lastRun = '尚未发送过请求';
 let lastSystemBlocks = null;
 let nativeOpenAIModule = null;
 let processedHistorySnapshot = null;
+let generationHistorySnapshot = null;
+let nativeHistoryInterceptorSupported = false;
+let generationScope = null;
+
+function onGenerationStarted(type, options = {}, dryRun = false) {
+    processedHistorySnapshot = null;
+    generationHistorySnapshot = null;
+    generationScope = {
+        chatId: ctx().getCurrentChatId(), type: type ?? 'normal', dryRun: !!dryRun,
+        confirmed: false, worldInfoHandled: false, settingsHandled: false,
+        auxiliary: typeof options.quiet_prompt === 'string' && !!options.quiet_prompt.trim(),
+    };
+}
+
+function clearGenerationScope() {
+    generationScope = null;
+    processedHistorySnapshot = null;
+    generationHistorySnapshot = null;
+}
+
+function isMainGenerationScope() {
+    return !!generationScope && generationScope.chatId === ctx().getCurrentChatId()
+        && generationScope.confirmed && !generationScope.dryRun && !generationScope.auxiliary
+        && ['normal', 'regenerate', 'swipe'].includes(generationScope.type);
+}
+
+function onWorldInfoEntriesLoaded(data) {
+    if (!isMainGenerationScope() || generationScope.worldInfoHandled) return;
+    generationScope.worldInfoHandled = true;
+    routeEntries([data?.globalLore, data?.characterLore, data?.chatLore, data?.personaLore]);
+}
 
 async function loadNativePromptManager() {
     try {
         // Read the host's finished messages; never run the user's regex or macros again.
         // Keep the namespace: ST replaces this exported live binding after API changes.
-        nativeOpenAIModule = await import('/scripts/openai.js');
+        const [openai, extensions] = await Promise.all([import('/scripts/openai.js'), import('/scripts/extensions.js')]);
+        nativeOpenAIModule = openai;
+        nativeHistoryInterceptorSupported = typeof extensions.runGenerationInterceptors === 'function';
     } catch { /* Older hosts keep the conservative raw-chat fallback. */ }
 }
 
@@ -157,16 +193,10 @@ function routeEntries(lists) {
     // 这时固定设定改插到聊天记录最顶端（深度 TOP_DEPTH），不管预设怎么排都在聊天记录之前。
     const beforeSlotOk = presetSlotBeforeHistory('worldInfoBefore');
     const afterSlotOk = presetSlotBeforeHistory('worldInfoAfter');
-    let moved = 0, template = null, target = null;
-    let topMoved = 0, topTemplate = null, topTarget = null;
-    let stickyMoved = 0, stickyTemplate = null, stickyTarget = null;
     const stickyTurns = Math.max(0, Math.floor(Number(s.stickyTurns) || 0));
     const stickyOn = s.stickyLore && !systemBlocksGetMerged();
-    const toTop = (e, list, order) => {
+    const toTop = (e, order) => {
         Object.assign(e, { position: POS.atDepth, depth: TOP_DEPTH, role: ROLE_SYSTEM, order });
-        topMoved++;
-        topTemplate ??= e;
-        topTarget ??= list;
     };
 
     for (const list of lists) {
@@ -188,54 +218,30 @@ function routeEntries(lists) {
                         order: STICKY_ORDER_BASE + (pos === POS.after ? 50000 : 0) + (Number(e.order) || 0),
                         sticky: Math.max(Number(e.sticky) || 0, stickyTurns),
                     });
-                    stickyMoved++;
-                    stickyTemplate ??= e;
-                    stickyTarget ??= list;
                 } else if (!e.constant || isDynamicEntry(e)) {
                     Object.assign(e, { position: POS.atDepth, depth: 0, role: ROLE_SYSTEM });
-                    moved++;
-                    template ??= e;
-                    target ??= list;
                 } else if (pos === POS.before ? !beforeSlotOk : !afterSlotOk) {
-                    toTop(e, list, (pos === POS.after ? 50000 : 0) + (Number(e.order) || 0));
+                    toTop(e, (pos === POS.after ? 50000 : 0) + (Number(e.order) || 0));
                 }
             } else if (pos === POS.atDepth && (!e.constant || isDynamicEntry(e))) {
                 // 会变的深度条目统一放到深度 0：深度设得比聊天记录还大时它会落进系统提示，
                 // 放在中间也会随楼层后移改写前缀；深度 0 之后由发送前重排挪到聊天记录末尾
                 if (Number(e.depth) !== 0) {
                     e.depth = 0;
-                    moved++;
                 }
             } else if (s.hoistStatic && e.constant && !isDynamicEntry(e)
-                && (pos === POS.atDepth || pos === POS.anTop || pos === POS.anBottom)) {
+                && pos === POS.atDepth && Number(e.role ?? ROLE_SYSTEM) === ROLE_SYSTEM) {
                 // 固定规则前移到聊天记录之前；按原深度从深到浅、再按 order 排，保持原先的相对顺序
-                const depth = pos === POS.atDepth ? Number(e.depth) || 0 : 0;
+                // before 槽固定使用 system；保留 user/assistant 深度条目及角色由作者注释控制的 AN 条目。
+                const depth = Number(e.depth) || 0;
                 const order = HOIST_ORDER_BASE + (100 - Math.min(depth, 99)) * 1000 + (Number(e.order) || 0);
                 if (beforeSlotOk) Object.assign(e, { position: POS.before, order });
-                else toTop(e, list, order);
+                else toTop(e, order);
             }
         }
     }
-
-    const wrap = (from, uid, content, order, depth) => ({
-        ...from, uid, world: WRAP_WORLD, comment: content, content, order,
-        key: [], keysecondary: [], constant: true, disable: false, selective: false,
-        useProbability: false, probability: 100, group: '', groupOverride: false,
-        sticky: 0, cooldown: 0, delay: 0, position: POS.atDepth, depth, role: ROLE_SYSTEM,
-        excludeRecursion: true, preventRecursion: true,
-    });
-    if (moved && template && target) {
-        target.push(wrap(template, -910001, WRAP_OPEN, -1000000, 0), wrap(template, -910002, WRAP_CLOSE, 1000000, 0));
-    }
-    if (topMoved && topTemplate && topTarget) {
-        topTarget.push(wrap(topTemplate, -910003, STATIC_OPEN, -1000000, TOP_DEPTH), wrap(topTemplate, -910004, STATIC_CLOSE, 1000000, TOP_DEPTH));
-    }
-    if (stickyMoved && stickyTemplate && stickyTarget) {
-        stickyTarget.push(
-            wrap(stickyTemplate, -910005, STICKY_OPEN, STICKY_ORDER_BASE - 500000, TOP_DEPTH),
-            wrap(stickyTemplate, -910006, STICKY_CLOSE, STICKY_ORDER_BASE + 1000000, TOP_DEPTH),
-        );
-    }
+    // 不添加装饰性世界书条目：即使原条目未激活，constant 包裹也会占用预算、
+    // 满足最小激活数，并可能继承 automationId 触发真实 Quick Reply。
 }
 
 // ───────────────────────── 2. 发送前重排 + 3. 自动学习 ─────────────────────────
@@ -247,43 +253,85 @@ function headOf(message) {
 /** 插在聊天记录最顶端、要留在前面的块（固定设定 / 近期剧情设定） */
 function isTopBlock(message) {
     const t = text(message).trimStart();
-    return t.startsWith(STATIC_OPEN) || t.startsWith(STICKY_OPEN);
+    if (t.startsWith(STATIC_OPEN) || t.startsWith(STICKY_OPEN)) return true;
+    // ST exposes the activated, assembled top-depth lore as an extension prompt.
+    // Match the complete block instead of adding constant scan entries as labels.
+    const top = ctx().extensionPrompts?.[`customDepthWI_${TOP_DEPTH}_${ROLE_SYSTEM}`];
+    return message.role === 'system' && top?.depth === TOP_DEPTH && top?.role === ROLE_SYSTEM
+        && typeof top.value === 'string' && !!top.value.trim() && normalize(t) === normalize(top.value);
 }
 
 function isVolatileHead(head) {
-    const { volatileHeads, learnedHeads } = settings();
-    return [...volatileHeads, ...learnedHeads].some(h => h && head.startsWith(h));
+    return settings().volatileHeads.some(h => h && head.startsWith(h)) || learnedHeadsForScope().includes(head);
+}
+
+function learningScopeKey() {
+    const c = ctx();
+    const owner = c.groupId ? ['group', String(c.groupId)]
+        : ['character', String(c.characters?.[c.characterId]?.avatar ?? c.characterId ?? '')];
+    return JSON.stringify([...owner, String(c.getCurrentChatId() ?? '')]);
+}
+
+function learnedHeadsForScope() {
+    // Legacy global heads cannot safely be attributed to a character or chat.
+    const record = settings().learnedByScope[learningScopeKey()];
+    return record && Number.isFinite(record.updatedAt) && Date.now() - record.updatedAt < LEARNED_TTL
+        && Array.isArray(record.heads) ? record.heads : [];
+}
+
+function rememberLearnedHeads(heads) {
+    const s = settings(), now = Date.now();
+    const records = Object.entries(s.learnedByScope).filter(([, record]) => record
+        && Number.isFinite(record.updatedAt) && now - record.updatedAt < LEARNED_TTL);
+    const key = learningScopeKey();
+    s.learnedByScope = Object.fromEntries([...records.filter(([id]) => id !== key),
+        [key, { heads: [...new Set(heads)].slice(-MAX_LEARNED), updatedAt: now }]]
+        .sort((a, b) => a[1].updatedAt - b[1].updatedAt).slice(-MAX_LEARNING_SCOPES));
 }
 
 function normalize(value) {
     return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
 
-/** 最近的真实聊天消息各取几段文字，用来在提示词里认出哪些是聊天记录 */
-function historySnippets() {
-    return (ctx().chat ?? [])
-        .filter(m => m && !m.is_system && typeof m.mes === 'string' && m.mes.trim())
-        .slice(-60)
-        .map(m => {
-            const t = normalize(m.mes);
-            if (t.length <= 60) return { role: m.is_user ? 'user' : 'assistant', exact: t, snippets: [] };
-            // 取中段：开头常是思维链、结尾常是变量块，都可能被正则删掉
-            return { role: m.is_user ? 'user' : 'assistant', exact: t,
-                snippets: [0.3, 0.5, 0.7].map(p => t.slice(Math.floor(t.length * p), Math.floor(t.length * p) + 30)) };
-        });
-}
-
 function currentProcessedHistory() {
-    if (processedHistorySnapshot?.chatId !== ctx().getCurrentChatId()) processedHistorySnapshot = null;
+    const chatId = ctx().getCurrentChatId();
+    if (processedHistorySnapshot?.chatId !== chatId) processedHistorySnapshot = null;
+    if (generationHistorySnapshot?.chatId !== chatId) generationHistorySnapshot = null;
     return processedHistorySnapshot;
 }
 
-function processedHistoryText(message) {
-    const t = normalize(text(message)), c = ctx();
-    const names = [message.role === 'user' ? c.name1 : c.name2,
-        ...(c.chat ?? []).filter(raw => raw && (raw.is_user ? 'user' : 'assistant') === message.role).map(raw => raw.name)]
-        .filter(name => typeof name === 'string' && name.trim() && name.length <= 80 && !/[\r\n]/.test(name));
-    for (const name of names) {
+/** Official ST interceptor: coreChat has already passed prompt regex, file and
+ * reasoning processing, and has not received worldbook/depth injections yet.
+ * Read only; never run the user's transformations a second time.
+ */
+function captureGenerationHistory(chat, _contextSize, _abort, type) {
+    nativeHistoryInterceptorSupported = true;
+    processedHistorySnapshot = null;
+    const generationType = type ?? 'normal';
+    if (generationScope && generationScope.type === generationType) generationScope.confirmed = true;
+    const blocked = !isMainGenerationScope() || !Array.isArray(chat);
+    generationHistorySnapshot = {
+        chatId: ctx().getCurrentChatId(), pending: true, blocked,
+        entries: blocked ? [] : chat.filter(message => message && !message.is_system
+            && typeof message.mes === 'string' && message.mes.trim() && message.extra?.type !== 'narrator')
+            .map(message => ({ role: message.is_user ? 'user' : 'assistant', content: message.mes })),
+    };
+}
+globalThis.cacheOptimizerCaptureHistory = captureGenerationHistory;
+
+function historyNames() {
+    const c = ctx(), names = { user: new Set(), assistant: new Set() };
+    const add = (role, name) => {
+        if (typeof name === 'string' && name.trim() && name.length <= 80 && !/[\r\n]/.test(name)) names[role].add(normalize(name));
+    };
+    add('user', c.name1); add('assistant', c.name2);
+    for (const raw of c.chat ?? []) if (raw) add(raw.is_user ? 'user' : 'assistant', raw.name);
+    return names;
+}
+
+function processedHistoryText(message, names = historyNames()) {
+    const t = normalize(text(message));
+    for (const name of names[message.role] ?? []) {
         const prefix = `${normalize(name)}: `;
         if (t.startsWith(prefix)) return t.slice(prefix.length);
     }
@@ -305,30 +353,100 @@ function hasRawHistoryWitness(message) {
     });
 }
 
-function captureProcessedHistory(manager, chat) {
-    processedHistorySnapshot = null;
+function captureProcessedHistory(manager, chat, dryRun = false) {
+    if (dryRun) return;
+    const previous = currentProcessedHistory();
     if (!Array.isArray(chat)) return;
+    const source = generationHistorySnapshot;
+    if (!source?.pending) {
+        // Helper generations do not pass the native coreChat interceptor. Do not
+        // erase confirmed main provenance while its SETTINGS event is pending.
+        // A different helper prompt still cannot match that complete sequence.
+        if (nativeHistoryInterceptorSupported && !previous) processedHistorySnapshot = { chatId: ctx().getCurrentChatId(), entries: [], requiredRoles: [] };
+        return;
+    }
+    processedHistorySnapshot = { chatId: source.chatId, entries: [], requiredRoles: [] };
+    if (source.blocked) { source.pending = false; return; }
     try {
         const collections = manager?.messages?.getCollection?.();
         const history = collections?.find(collection => collection?.identifier === 'chatHistory');
         const messages = history?.getCollection?.();
         if (!Array.isArray(messages)) return;
+        // Tool history is unsupported only while it survives native budgeting.
+        // An old tool invocation outside the final prompt must not block forever.
+        if (messages.some(message => message?.role === 'tool' || message?.tool_calls || message?.tool_call_id)
+            || chat.some(message => message?.role === 'tool' || message?.tool_calls || message?.tool_call_id)) return;
         const entries = messages.filter(message => /^chatHistory-\d+$/.test(message?.identifier)
             && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string'
-            && hasRawHistoryWitness(message)
-            && chat.some(candidate => candidate.role === message.role && normalize(text(candidate)) === normalize(message.content)))
+            && !message.tool_calls && !message.tool_call_id)
             .map(message => ({ role: message.role, content: message.content }));
-        if (entries.length) processedHistorySnapshot = { chatId: ctx().getCurrentChatId(), entries };
+        const located = alignHistorySequence(entries, source.entries);
+        if (!located) return;
+        const selected = source.entries.slice(located.sourceStart);
+        const requiredRoles = [...new Set(source.entries.map(item => item.role))];
+        if (!locateHistorySequence(chat, selected, requiredRoles)) return;
+        source.pending = false;
+        processedHistorySnapshot = { chatId: source.chatId, entries: selected, requiredRoles };
     } catch { /* Unrecognized host collection shapes are not guessed. */ }
 }
 
 function matchesHistoryText(message, item) {
     if (message.role !== item.role) return false;
-    const t = processedHistoryText(message), expected = processedHistoryText(item);
+    const names = historyNames(), t = processedHistoryText(message, names), expected = processedHistoryText(item, names);
     if (!t || !expected) return false;
     // Late rebuilding must retain the complete processed message. Quoted anchors
     // in a worldbook injection do not make that injection a history message.
     return t === expected;
+}
+
+function alignHistorySequence(chat, entries, requiredRoles = [...new Set(entries.map(item => item.role))]) {
+    if (!entries.length) return null;
+    const names = historyNames(), index = { user: new Map(), assistant: new Map() };
+    for (let i = 0; i < chat.length; i++) {
+        const message = chat[i], byText = index[message.role];
+        if (!byText) continue;
+        const canonical = processedHistoryText(message, names);
+        if (!canonical) continue;
+        if (!byText.has(canonical)) byText.set(canonical, []);
+        byText.get(canonical).push(i);
+    }
+    const expected = entries.map(item => ({ role: item.role, text: processedHistoryText(item, names) }));
+    const previous = (positions, before) => {
+        let lo = 0, hi = positions.length;
+        while (lo < hi) { const mid = (lo + hi) >>> 1; if (positions[mid] < before) lo = mid + 1; else hi = mid; }
+        return positions[lo - 1];
+    };
+    const next = (positions, after) => {
+        let lo = 0, hi = positions.length;
+        while (lo < hi) { const mid = (lo + hi) >>> 1; if (positions[mid] <= after) lo = mid + 1; else hi = mid; }
+        return positions[lo];
+    };
+    const positions = [], roles = new Set();
+    let before = chat.length, sourceStart = entries.length;
+    for (let i = entries.length - 1; i >= 0; i--) {
+        const item = expected[i], matching = item.text ? index[item.role]?.get(item.text) ?? [] : [];
+        const position = previous(matching, before);
+        if (position === undefined) break; // Native budgeting can drop an older prefix.
+        before = position; positions.push(before); roles.add(item.role); sourceStart = i;
+    }
+    if (!positions.length || requiredRoles.some(role => !roles.has(role))) return null;
+    // Repeated real short turns (e.g. "continue") are constrained by their full
+    // neighboring turns. Accept only when earliest and latest valid alignments
+    // have the same boundaries; a full quote outside history remains ambiguous.
+    let after = -1, first;
+    for (let i = sourceStart; i < expected.length; i++) {
+        const item = expected[i], position = next(index[item.role]?.get(item.text) ?? [], after);
+        if (position === undefined) return null;
+        if (first === undefined) first = position;
+        after = position;
+    }
+    const start = positions.at(-1), end = positions[0];
+    return first === start && after === end ? { start, end, sourceStart } : null;
+}
+
+function locateHistorySequence(chat, entries, requiredRoles) {
+    const aligned = alignHistorySequence(chat, entries, requiredRoles);
+    return aligned ? { start: aligned.start, end: aligned.end } : null;
 }
 
 /**
@@ -336,36 +454,16 @@ function matchesHistoryText(message, item) {
  * 不能把「第一条非 system 消息」当成聊天记录的开头，所以拿真实聊天消息逐条比对。
  */
 function findRawHistoryRange(chat) {
-    const snippets = historySnippets();
-    if (!snippets.length) return null;
-    let start = -1, end = -1;
-    chat.forEach((m, i) => {
-        if (m.role === 'system') return;
-        const t = normalize(text(m));
-        if (t && snippets.some(item => item.role === m.role && (t === item.exact
-            || (item.exact.length > 8 && t.endsWith(`: ${item.exact}`))
-            || item.snippets.some(s => s && t.includes(s))))) {
-            if (start < 0) start = i;
-            end = i;
-        }
-    });
-    return start < 0 ? null : { start, end };
+    const entries = (ctx().chat ?? []).filter(message => message && !message.is_system
+        && typeof message.mes === 'string' && message.mes.trim() && message.extra?.type !== 'narrator')
+        .map(message => ({ role: message.is_user ? 'user' : 'assistant', content: message.mes }));
+    return locateHistorySequence(chat, entries);
 }
 
 function findHistoryRange(chat) {
     const snapshot = currentProcessedHistory();
-    // Do not let an exact-only snapshot of the latest user shrink an already
-    // confirmed real assistant boundary and promote intervening runtime systems.
-    const legacy = findRawHistoryRange(chat);
-    if (legacy) return legacy;
-    if (!snapshot) return null;
-    const matches = snapshot.entries.flatMap(item => {
-        const matching = chat.map((message, i) => matchesHistoryText(message, item) ? i : -1).filter(i => i >= 0);
-        return matching.length === 1 ? [{ at: matching[0], role: item.role }] : [];
-    });
-    if (!['assistant', 'user'].every(role => matches.some(item => item.role === role))) return null;
-    const positions = matches.map(item => item.at);
-    return { start: Math.min(...positions), end: Math.max(...positions) };
+    return snapshot ? locateHistorySequence(chat, snapshot.entries, snapshot.requiredRoles)
+        : findRawHistoryRange(chat);
 }
 
 function reorder(chat) {
@@ -393,7 +491,7 @@ function reorder(chat) {
 
     const at = chat.indexOf(anchor);
     // 认出了聊天记录：放在它之后；否则放在最后一条用户消息之前
-    chat.splice(range ? at + 1 : at, 0, ...moved);
+    chat.splice(at + 1, 0, ...moved);
     return moved.length;
 }
 
@@ -439,15 +537,27 @@ function splitKnownDynamicBlocks(chat) {
 function learnFrom(chat) {
     const s = settings();
     if (!s.learn) return [];
+    const chatId = ctx().getCurrentChatId();
+    const scopeKey = learningScopeKey();
+    if (lastSystemBlocks?.scopeKey !== scopeKey) changeCounts.clear();
     const range = findHistoryRange(chat);
     const firstTurn = chat.findIndex(m => m.role !== 'system');
     const stop = range ? range.start : (firstTurn < 0 ? chat.length : firstTurn);
     // 顶端设定块随场景变化是预期内的，不能学成易变块挪走
     const blocks = chat.slice(0, stop).filter(m => m.role === 'system' && !isTopBlock(m)).map(m => ({ head: headOf(m), body: text(m) }));
     const learned = [];
-    if (lastSystemBlocks && lastSystemBlocks.chatId === ctx().getCurrentChatId()) {
-        const prev = new Map(lastSystemBlocks.blocks.map(b => [b.head, b.body]));
-        for (const b of blocks) {
+    if (lastSystemBlocks && lastSystemBlocks.scopeKey === scopeKey) {
+        // A head is only an identifier when it occurs once on both sides.
+        // Collapsing duplicate heads into a Map compares separate fixed blocks.
+        const unique = list => {
+            const counts = new Map();
+            for (const b of list) counts.set(b.head, (counts.get(b.head) ?? 0) + 1);
+            return new Map(list.filter(b => counts.get(b.head) === 1).map(b => [b.head, b.body]));
+        };
+        const prev = unique(lastSystemBlocks.blocks), current = unique(blocks);
+        for (const head of changeCounts.keys()) if (!prev.has(head) || !current.has(head)) changeCounts.delete(head);
+        for (const [head, body] of current) {
+            const b = { head, body };
             if (b.head.length < 4 || !prev.has(b.head) || prev.get(b.head) === b.body || isVolatileHead(b.head)) continue;
             // 大块（整本世界书之类）挪到聊天记录之后，每轮整块按原价算，比偶尔变一次贵得多
             if (b.body.length > MAX_LEARN_CHARS) continue;
@@ -455,34 +565,85 @@ function learnFrom(chat) {
             const seen = (changeCounts.get(b.head) ?? 0) + 1;
             changeCounts.set(b.head, seen);
             if (seen < 2) continue;
-            s.learnedHeads.push(b.head);
             learned.push(b.head);
         }
         if (learned.length) {
-            s.learnedHeads = s.learnedHeads.slice(-MAX_LEARNED);
+            rememberLearnedHeads([...learnedHeadsForScope(), ...learned]);
             save();
         }
     }
-    lastSystemBlocks = { chatId: ctx().getCurrentChatId(), blocks };
+    lastSystemBlocks = { chatId, scopeKey, blocks };
     return learned;
+}
+
+function forgetLearned() {
+    settings().learnedHeads = [];
+    settings().learnedByScope = {};
+    changeCounts.clear();
+    lastSystemBlocks = null;
+    save();
+    renderLearned();
 }
 
 function onPromptReady(data) {
     armFinalHook();
-    captureProcessedHistory(nativeOpenAIModule?.promptManager, data?.chat);
+    if (data?.dryRun) return;
+    captureProcessedHistory(nativeOpenAIModule?.promptManager, data?.chat, data?.dryRun);
+    if (generationScope?.type === 'continue') {
+        lastRun = '本次保守跳过：continue / assistant prefill 的末尾结构暂不支持重排。';
+        $('#cacheopt_last').text(lastRun);
+        return;
+    }
     if (!settings().enabled || !Array.isArray(data?.chat)) return;
-    splitKnownDynamicBlocks(data.chat);
-    const n = reorder(data.chat);
-    if (data.dryRun) return;
-    lastRun = `${new Date().toLocaleTimeString()} 发送前重排：移动了 ${n} 个块`
-        + '（等待数据库及预设的最终处理）';
+    if (!isMainGenerationScope()) {
+        if (generationScope && !generationScope.dryRun && !generationScope.auxiliary
+            && ['normal', 'regenerate', 'swipe'].includes(generationScope.type) && !generationScope.confirmed) reportHistorySkip('未收到当前宿主历史来源');
+        return;
+    }
+    if (!findHistoryRange(data.chat)) {
+        // A raw database helper can emit PROMPT_READY while main provenance is
+        // pending or already consumed. Defer an ambiguous failure until a typed
+        // main SETTINGS so helper prompts never replace the main report.
+        return;
+    }
+    // This event has no generation type. Raw helpers may contain the complete
+    // same history, so only observe provenance here; mutate typed main SETTINGS.
+    lastRun = `${new Date().toLocaleTimeString()} 已确认宿主历史来源，等待正文请求的最终处理。`;
     $('#cacheopt_last').text(lastRun);
     renderLearned();
 }
 
+function reportHistorySkip(reason) {
+    lastRun = `本次保守跳过：${reason}；请更新酒馆和插件后刷新，检查聊天可见楼层及提示词加工。`;
+    $('#cacheopt_last').text(lastRun);
+}
+
+function confirmFinalHistory(chat) {
+    const source = generationHistorySnapshot;
+    processedHistorySnapshot = { chatId: ctx().getCurrentChatId(), entries: [], requiredRoles: [] };
+    if (!source || source.blocked || source.chatId !== ctx().getCurrentChatId()
+        || chat.some(message => message?.role === 'tool' || message?.tool_calls || message?.tool_call_id)) return false;
+    // Only SETTINGS carries the generation type. Re-align the complete official
+    // core here, so an earlier untyped helper's smaller budget cannot shorten the
+    // main history boundary or turn older dynamic material into a fixed rule.
+    const located = alignHistorySequence(chat, source.entries);
+    if (!located) return false;
+    const entries = source.entries.slice(located.sourceStart);
+    processedHistorySnapshot = { chatId: source.chatId, entries, requiredRoles: [...new Set(entries.map(item => item.role))] };
+    return true;
+}
+
 function onSettingsReady(data) {
-    if (!settings().enabled || !Array.isArray(data?.messages) || data.type === 'quiet') return;
-    if (!findHistoryRange(data.messages)) return;
+    if (!settings().enabled || !Array.isArray(data?.messages)
+        || !['normal', 'regenerate', 'swipe'].includes(data.type)) return;
+    if (!isMainGenerationScope()) {
+        if (!generationScope || !generationScope.dryRun && !generationScope.auxiliary
+            && ['normal', 'regenerate', 'swipe'].includes(generationScope.type)) reportHistorySkip('未收到当前宿主历史来源');
+        return;
+    }
+    if (generationScope.settingsHandled) return;
+    if (!confirmFinalHistory(data.messages)) { reportHistorySkip('无法确认真实历史'); return; }
+    generationScope.settingsHandled = true;
     splitKnownDynamicBlocks(data.messages);
     const learned = learnFrom(data.messages);
     const n = reorder(data.messages);
@@ -524,6 +685,9 @@ const RECENT_LIMIT = 8;
 const ACU_INTERNAL = Symbol.for('acu.internal-generation-fetch');
 // 仅在同聊天、同来源/模型/请求类型内，对比紧邻上次请求，避免重复请求美化连续楼层结果。
 let recentReal = [];
+// A failed attempt leaves the comparison baseline, but remains the latest UI
+// owner so an older response cannot replace its failure report.
+let latestRealAttempt = null;
 
 /** Complete runtime records produced by this card's scripts, after template rendering.
  * Rules merely mentioning fortune or a current turn are not runtime provenance.
@@ -556,6 +720,7 @@ function splitRuntimeSystemRecords(messages) {
 function applyGeminiProxyLayout(body) {
     const skip = reason => ({ applied: false, reason });
     if (!settings().enabled || !settings().compatGeminiProxy) return skip('disabled');
+    if (body?.type === 'continue') return skip('continue-prefill');
     if (body?.type !== 'normal' || body?.[ACU_INTERNAL]) return skip('non-main');
     if (!['custom', 'vertexai', 'makersuite'].includes(body.chat_completion_source)
         || !/gemini/i.test(String(body.model ?? ''))) return skip('connection');
@@ -609,22 +774,25 @@ function describeGeminiLayout(report) {
 }
 
 function requestInitWithBody(init, body) {
-    const forwarded = Object.create(null), seen = new Set(['body']);
-    // Preserve dictionary members without rebinding class/private-field getters
-    // to a child object. Only fetch's actual property reads invoke these getters.
-    for (let owner = init; owner; owner = Object.getPrototypeOf(owner)) {
-        for (const key of Reflect.ownKeys(owner)) {
-            if (seen.has(key)) continue;
-            seen.add(key);
-            const descriptor = Object.getOwnPropertyDescriptor(owner, key);
-            Object.defineProperty(forwarded, key, {
-                configurable: true, enumerable: descriptor?.enumerable ?? false,
-                get: () => Reflect.get(init, key, init),
-            });
-        }
-    }
+    const forwarded = Object.create(null);
     Object.defineProperty(forwarded, 'body', { value: body, enumerable: true, configurable: true, writable: true });
-    return forwarded;
+    // Fetch reads RequestInit dictionary members directly, including members a
+    // Proxy supplies without listing them in ownKeys. Keep the original receiver
+    // for class/private-field getters; use a separate target so an immutable
+    // original body does not impose Proxy invariants on the replacement body.
+    return new Proxy(forwarded, {
+        get(target, key, receiver) {
+            return Object.hasOwn(target, key) ? Reflect.get(target, key, receiver) : Reflect.get(init, key, init);
+        },
+        has: (target, key) => Reflect.has(target, key) || Reflect.has(init, key),
+        ownKeys: target => [...new Set([...Reflect.ownKeys(target), ...Reflect.ownKeys(init)])],
+        getOwnPropertyDescriptor(target, key) {
+            const own = Reflect.getOwnPropertyDescriptor(target, key);
+            if (own) return own;
+            const descriptor = Reflect.getOwnPropertyDescriptor(init, key);
+            return descriptor ? { configurable: true, enumerable: descriptor.enumerable, get: () => Reflect.get(init, key, init) } : undefined;
+        },
+    });
 }
 
 function messageTexts(body) {
@@ -663,7 +831,7 @@ function describeReal(prev, cur, gapSec) {
 
 function recordRealRequest(rawBody) {
     let body;
-    try { body = JSON.parse(rawBody); } catch { return; }
+    try { body = JSON.parse(rawBody); } catch { return null; }
     if (!body || !Array.isArray(body.messages) || body.type === 'quiet' || !findHistoryRange(body.messages)) return null;
     const chatId = ctx().getCurrentChatId?.() ?? '';
     const now = Date.now();
@@ -683,6 +851,7 @@ function recordRealRequest(rawBody) {
         console.info('[缓存优化] 真实发送对比\n' + report);
     }
     recentReal = [...recentReal.filter(r => r.chatId === chatId), cur].slice(-RECENT_LIMIT);
+    latestRealAttempt = cur;
     $('#cacheopt_usage').text(`${body.model ?? '当前正文模型'}｜API 缓存统计：等待响应…`);
     return cur;
 }
@@ -785,9 +954,12 @@ function describeUsageSources(snapshot, usage) {
 
 async function observeUsage(response, request) {
     if (!request || !response.ok) return;
-    let snapshot = null, complete = false, incompleteReason = '响应读取失败';
+    let snapshot = null, complete = false, failedAttempt = false, incompleteReason = '响应读取失败';
     try {
         const copy = response.clone();
+        const isProviderError = (payload, type = '') => payload?.error != null || payload?.response?.error != null
+            || [type, payload?.type].some(value => ['error', 'response.failed', 'response.incomplete'].includes(value));
+        const markProviderError = () => { failedAttempt = true; incompleteReason = '接口返回错误事件'; };
         const accept = (payload, type = '') => {
             snapshot = mergeUsageSnapshot(snapshot, extractUsageSnapshot(payload, snapshot?.protocol, type));
         };
@@ -800,13 +972,13 @@ async function observeUsage(response, request) {
             const line = value => {
                 if (value === '') {
                     const payload = data.join('\n').trim();
-                    if (eventType === 'error') { stopped = true; incompleteReason = '接口返回错误事件'; }
-                    else if (payload && payload !== '[DONE]' && payload !== 'ping' && eventType !== 'ping') {
+                    if (isProviderError(null, eventType)) { stopped = true; markProviderError(); }
+                    else if (payload === '[DONE]') { stopped = true; complete = true; }
+                    else if (payload && payload !== 'ping' && eventType !== 'ping') {
                         try {
                             const parsed = JSON.parse(payload);
-                            if (parsed?.error != null || parsed?.response?.error != null
-                                || ['error', 'response.failed', 'response.incomplete'].includes(parsed?.type)) {
-                                stopped = true; incompleteReason = '接口返回错误事件';
+                            if (isProviderError(parsed)) {
+                                stopped = true; markProviderError();
                             } else accept(parsed, eventType);
                         } catch { stopped = true; incompleteReason = 'SSE 数据事件无法解析'; }
                     }
@@ -832,7 +1004,7 @@ async function observeUsage(response, request) {
                         buffer = buffer.slice(end + 1);
                         if (stopped) break;
                     }
-                    if (buffer.length + eventChars > maxEventChars) { stopped = true; incompleteReason = 'SSE 事件过大，已停止观察'; }
+                    if (!stopped && buffer.length + eventChars > maxEventChars) { stopped = true; incompleteReason = 'SSE 事件过大，已停止观察'; }
                     if (stopped) { void reader.cancel().catch(() => {}); break; }
                     if (done) {
                         if (buffer || data.length) incompleteReason = 'SSE 事件未完整结束';
@@ -840,10 +1012,22 @@ async function observeUsage(response, request) {
                         break;
                     }
                 }
+            } catch (error) {
+                if (error?.name === 'AbortError') {
+                    failedAttempt = true;
+                    incompleteReason = '响应已取消';
+                }
+                throw error;
             } finally { reader.releaseLock(); }
-        } else { accept(await copy.json()); complete = true; }
+        } else {
+            const payload = await copy.json();
+            if (isProviderError(payload)) markProviderError();
+            else { accept(payload); complete = true; }
+        }
     } catch { /* 原响应继续交给酒馆；旁观失败不能被算作 0 */ }
-    if (ctx().getCurrentChatId?.() !== request.chatId || recentReal.at(-1) !== request) return;
+    const latest = latestRealAttempt === request;
+    if (failedAttempt) recordRequestFailure(request, false);
+    if (ctx().getCurrentChatId?.() !== request.chatId || !latest) return;
     const usage = calculateUsage(snapshot);
     const ratio = usage?.cached !== null && usage?.cached !== undefined && usage?.total > 0 && !usage.inconsistent
         ? `（${(usage.cached / usage.total * 100).toFixed(1)}%）` : '';
@@ -858,11 +1042,11 @@ async function observeUsage(response, request) {
     $('#cacheopt_usage').attr('title', `${complete ? '' : '未完成，以下仅为部分字段\n'}${describeUsageSources(snapshot, usage)}`);
 }
 
-function recordRequestFailure(request) {
+function recordRequestFailure(request, updateReport = true) {
     if (!request) return;
-    const latest = recentReal.at(-1) === request;
+    const latest = latestRealAttempt === request;
     recentReal = recentReal.filter(r => r !== request);
-    if (latest && ctx().getCurrentChatId?.() === request.chatId) {
+    if (updateReport && latest && ctx().getCurrentChatId?.() === request.chatId) {
         $('#cacheopt_usage').text('正文请求失败或已取消：没有可确认的 API 缓存统计。');
     }
 }
@@ -874,28 +1058,43 @@ function watchRealRequests() {
         let request = null;
         let forwardedInit = init;
         try {
-            const url = typeof input === 'string' ? input : input?.url;
-            // 数据库已公开的内存标记；辅助模型处理输入/召回，不纳入正文统计。
-            if (!init?.[ACU_INTERNAL] && url && url.includes(GENERATE_PATH) && typeof init?.body === 'string') {
-                let rawBody = init.body;
-                if (settings().enabled && settings().compatGeminiProxy) {
-                    const body = JSON.parse(rawBody);
-                    const report = applyGeminiProxyLayout(body);
-                    if (report.applied) {
-                        rawBody = JSON.stringify(body);
-                        forwardedInit = requestInitWithBody(init, rawBody);
+            const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input?.url, window.location.href);
+            if (url.origin === window.location.origin && url.pathname === GENERATE_PATH) {
+                // Inspect data descriptors only. Calling an accessor before fetch
+                // would evaluate a one-shot body/method getter more than once.
+                const unknownMember = Symbol('cacheopt-unreadable-member');
+                const dataMember = key => {
+                    for (let owner = init; owner; owner = Object.getPrototypeOf(owner)) {
+                        const descriptor = Object.getOwnPropertyDescriptor(owner, key);
+                        if (descriptor) return Object.hasOwn(descriptor, 'value') ? descriptor.value : unknownMember;
                     }
-                    $('#cacheopt_last').text(`${lastRun}\n${describeGeminiLayout(report)}`);
+                };
+                const bodyDescriptor = init && Object.getOwnPropertyDescriptor(init, 'body');
+                const method = dataMember('method');
+                // 数据库已公开的内存标记；辅助模型处理输入/召回，不纳入正文统计。
+                if (typeof method === 'string' && method.toUpperCase() === 'POST' && !dataMember(ACU_INTERNAL)
+                    && bodyDescriptor && Object.hasOwn(bodyDescriptor, 'value') && typeof bodyDescriptor.value === 'string') {
+                    let rawBody = bodyDescriptor.value;
+                    if (settings().enabled && settings().compatGeminiProxy) {
+                        const body = JSON.parse(rawBody);
+                        const report = applyGeminiProxyLayout(body);
+                        if (report.applied) {
+                            rawBody = JSON.stringify(body);
+                            forwardedInit = requestInitWithBody(init, rawBody);
+                        }
+                        $('#cacheopt_last').text(`${lastRun}\n${describeGeminiLayout(report)}`);
+                    }
+                    request = recordRealRequest(rawBody);
                 }
-                request = recordRealRequest(rawBody);
             }
         } catch { /* 只旁观，出错不影响请求 */ }
         return original.call(this, input, forwardedInit).then(response => {
-            if (!response.ok) recordRequestFailure(request);
-            else if (request) void observeUsage(response, request);
+            if (!response.ok) {
+                try { recordRequestFailure(request); } catch { /* 旁观失败不改变原 HTTP 响应 */ }
+            } else if (request) void observeUsage(response, request).catch(() => {});
             return response;
         }, error => {
-            recordRequestFailure(request);
+            try { recordRequestFailure(request); } catch { /* 保留原请求异常 */ }
             throw error;
         });
     };
@@ -914,8 +1113,8 @@ function setEnabled(value) {
 }
 
 function renderLearned() {
-    const list = settings().learnedHeads;
-    $('#cacheopt_learned').text(list.length ? `已学到的易变块（${list.length}）：${list.join(' / ')}` : '已学到的易变块：暂无');
+    const list = learnedHeadsForScope();
+    $('#cacheopt_learned').text(list.length ? `当前聊天已学到的易变块（${list.length}）：${list.join(' / ')}` : '当前聊天已学到的易变块：暂无');
 }
 
 function bindCheckbox(id, key) {
@@ -930,7 +1129,7 @@ function renderSettings() {
     <div class="cacheopt-settings">
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <b>⚡ 缓存优化</b>
+          <b>⚡ 缓存优化 2.6.3</b>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
@@ -979,11 +1178,7 @@ function renderSettings() {
         save();
     });
     $('#cacheopt_check').on('click', checkStability);
-    $('#cacheopt_forget').on('click', () => {
-        settings().learnedHeads = [];
-        save();
-        renderLearned();
-    });
+    $('#cacheopt_forget').on('click', forgetLearned);
     $('#cacheopt_last').text(lastRun);
     // 不把旧版本的字符百分比或上次会话的 usage 当成本轮结果。
     renderLearned();
@@ -1006,9 +1201,10 @@ jQuery(() => {
     renderSettings();
     watchRealRequests();
     const c = ctx();
-    c.eventSource.on(c.eventTypes.WORLDINFO_ENTRIES_LOADED, data => {
-        routeEntries([data?.globalLore, data?.characterLore, data?.chatLore, data?.personaLore]);
-    });
+    c.eventSource.on(c.eventTypes.WORLDINFO_ENTRIES_LOADED, onWorldInfoEntriesLoaded);
+    if (c.eventTypes.GENERATION_STARTED) c.eventSource.on(c.eventTypes.GENERATION_STARTED, onGenerationStarted);
+    if (c.eventTypes.GENERATION_ENDED) c.eventSource.on(c.eventTypes.GENERATION_ENDED, clearGenerationScope);
+    if (c.eventTypes.GENERATION_STOPPED) c.eventSource.on(c.eventTypes.GENERATION_STOPPED, clearGenerationScope);
     c.eventSource.on(c.eventTypes.CHAT_COMPLETION_PROMPT_READY, onPromptReady);
     armFinalHook();
 });
