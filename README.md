@@ -1,10 +1,12 @@
-# 缓存优化 · shujuku 连续楼层适配版（2.6.1）
+# 缓存优化 · shujuku 连续楼层适配版（2.6.2）
 
 **Vertex 实测有一次明确返回约 73.2% 缓存，但该次最终正文为空。固定头强化仍默认关闭，尚未证明稳定可用。** 基线未返回缓存字段，不能声称插件将命中率从零提升至 73.2%。
 
 用于 SillyTavern 对话补全的请求整理与缓存诊断。保持角色卡、固定世界书和预设的前部稳定，将本轮动态召回放在历史之后。只调整本次扫描或请求副本，不修改角色卡、世界书或预设文件。
 
 基于 [pzwtxdy831-commits/ST-Cache-Optimizer](https://github.com/pzwtxdy831-commits/ST-Cache-Optimizer) 的公开适配分支，保留原项目 MIT 许可及作者署名。
+
+2.6.2 仅调整本地响应的用量统计，不改变请求布局、连接或缓存开关。参考 new-api 固定版本的计算语义独立实现，未引入其代码、依赖或服务，也未部署、运行或接入 new-api；本版只做离线验证，没有新增付费模型测试。
 
 本次针对的目标流程是：**数据库辅助模型处理不同的用户输入 → 召回纪要词条 → Vertex `gemini-4-argon` 生成正文**。用户不使用泉的记忆功能，因此该兼容项默认关闭。数据库处理模型可以与正文模型不同。原有实测使用 Catie OpenAI 兼容中转的 `build-gemini-3.8-flash` 别名；本轮使用 Vertex Gemini 3.1 Flash Lite，均不能替代目标 `gemini-4-argon` 测试。
 
@@ -18,6 +20,20 @@
 - 网络诊断排除数据库标记的内部辅助请求，按实际请求的模型、来源、接口和类型分组，只与同通道紧邻上一次请求比较。
 - 分别显示“请求前缀文本相似度”和“API 缓存 token”。支持 Vertex 原生流式 `usageMetadata.cachedContentTokenCount` 与 OpenAI 兼容统计；流式响应缺少 `Content-Type` 时也按请求的 `stream` 标记识别。字段缺失显示“未知”，仅明确返回零时显示零。
 - 删除截短当前聊天再模拟上一轮的检查。测试说明按钮不改聊天、不生成、不请求模型。
+
+## 2.6.2 用量统计口径
+
+缓存占比以响应实际返回的缓存读取 token 除以对应协议的总输入 token。各协议输入字段的含义不同：
+
+| 协议 | 总输入 token 口径 | 缓存读取统计 |
+| --- | --- | --- |
+| Gemini / Vertex 原生 | `promptTokenCount + toolUsePromptTokenCount` | `cachedContentTokenCount` |
+| OpenAI 兼容 | `prompt_tokens`，已包含缓存输入 | `prompt_tokens_details.cached_tokens` 等明确字段 |
+| Claude 原生 | `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` | `cache_read_input_tokens`；创建量单独记录 |
+
+同时兼容 DeepSeek 根级缓存字段和嵌套 `usage`。字段缺失仍为未知，不按 Go 整数字段默认值补零；只有明确返回零才显示零。SSE 中累计用量快照按字段存在情况更新，不能逐帧相加；异常结束的流标为未完成。缓存数大于输入时保留原始值并提示不一致，不强行截成 100%。
+
+计算语义参考：[new-api 用量归一化](https://github.com/QuantumNous/new-api/blob/3e2ce2c8856e32ca7054d673f8cd059ae466e80c/relaykit/dto/billing_usage.go#L318-L343)、[累计快照合并](https://github.com/QuantumNous/new-api/blob/3e2ce2c8856e32ca7054d673f8cd059ae466e80c/relaykit/dto/usage_merge.go#L215)。本插件保留 JSON 字段是否存在的信息，缺失值与明确零值分开处理。
 
 ## 安装与设置
 
@@ -67,6 +83,8 @@ git diff --check
 ```
 
 2.6.1 的 42 项离线回归测试、语法与差异检查通过。新增用例覆盖固定头布局、签名保留、固定占位防合并、原有历史边界优先级、运行时记录保护及保守跳过条件；这些检查不等于服务端缓存收益。
+
+2.6.2 的 48 项离线回归测试、语法与差异检查通过，并完成最终审查。下列 Catie 与 Vertex 数字均为历史实测，不是本版新增模型请求的结果。
 
 2.5.2 的 24 项离线回归测试通过。该版另使用实际角色卡、关联世界书与 Izumi 预设，在 Catie 中转完成 6 次不同输入的正常完整 AI 回复，输出上限保持 30000，数据库逻辑召回及剧情推进开启。第 2—6 轮各明确报告缓存 170 token，合计 850 / 330798 输入 token，缓存占比约 **0.257%**；第 1 轮统计未留存，记为未知。该组未启用本次新增的固定头强化。
 

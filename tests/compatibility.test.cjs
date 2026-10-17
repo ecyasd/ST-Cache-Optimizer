@@ -103,6 +103,37 @@ test('OpenAI-compatible proxies report cached prompt tokens through usage detail
     })), { cached: 7000, total: 10000 });
 });
 
+test('protocol-specific cache totals preserve Gemini and OpenAI inclusive counts and DeepSeek cache reads', () => {
+    const h = harness();
+    const cases = [
+        [{ usageMetadata: { promptTokenCount: 64305, cachedContentTokenCount: 47051 } }, { cached: 47051, total: 64305 }],
+        [{ usageMetadata: { promptTokenCount: 1000, toolUsePromptTokenCount: 50, cachedContentTokenCount: 600 } }, { cached: 600, total: 1050 }],
+        [{ usage: { prompt_tokens: 1000, prompt_tokens_details: { cached_tokens: 600 } } }, { cached: 600, total: 1000 }],
+        [{ response: { usage: { input_tokens: 1000, input_tokens_details: { cached_tokens: 600 } } } }, { cached: 600, total: 1000 }],
+        [{ usage: { prompt_tokens: 1000, prompt_cache_hit_tokens: 600 } }, { cached: 600, total: 1000 }],
+    ];
+    for (const [payload, expected] of cases) assert.deepEqual(plain(h.call('readUsage', payload)), expected);
+    let snapshot = h.call('extractUsageSnapshot', { usage: { prompt_tokens: 1000, prompt_tokens_details: { cached_tokens: 600 } } });
+    snapshot = h.call('mergeUsageSnapshot', snapshot, h.call('extractUsageSnapshot', { usage: { input_tokens: 2000 } }, 'openai'));
+    assert.equal(h.call('calculateUsage', snapshot).total, 2000);
+    snapshot = h.call('mergeUsageSnapshot', snapshot, h.call('extractUsageSnapshot', { usage: { total_input_tokens: 3000 } }, 'openai'));
+    assert.equal(h.call('calculateUsage', snapshot).total, 3000);
+});
+
+test('Anthropic native separate input buckets add once and explicit total fields take precedence', () => {
+    const h = harness();
+    const buckets = { input_tokens: 100, cache_read_input_tokens: 500, cache_creation_input_tokens: 200 };
+    assert.deepEqual(plain(h.call('readUsage', { type: 'message_start', message: { usage: buckets } })), { cached: 500, total: 800 });
+    assert.deepEqual(plain(h.call('readUsage', { usage: { ...buckets, prompt_tokens: 900 } })), { cached: 500, total: 900 });
+    assert.deepEqual(plain(h.call('readUsage', { usage: { ...buckets, prompt_tokens: 900, total_input_tokens: 950 } })), { cached: 500, total: 950 });
+    assert.deepEqual(plain(h.call('readUsage', { usage: { input_tokens: 100, cache_read_input_tokens: 500 } })), { cached: 500, total: null });
+    assert.equal(h.call('readUsage', { usage: { input_tokens: 100, cache_creation_input_tokens: 200 } }), null);
+    const snapshot = h.call('extractUsageSnapshot', { message: { usage: buckets } });
+    const sources = h.call('describeUsageSources', snapshot, h.call('calculateUsage', snapshot));
+    assert.match(sources, /message\.usage\.cache_read_input_tokens = 500/);
+    assert.match(sources, /输入分母 = message\.usage\.input_tokens \+ message\.usage\.cache_read_input_tokens \+ message\.usage\.cache_creation_input_tokens = 800/);
+});
+
 test('request comparison retains tool-call arguments and signatures', () => {
     const h = harness();
     const request = argument => ({ messages: [{
@@ -821,6 +852,95 @@ test('non-streaming usage observer reports unknown without consuming SillyTavern
     assert.doesNotMatch(h.call('settings').lastUsageReport, /token：0/);
     assert.equal(response.bodyUsed, false);
     assert.deepEqual(await response.json(), sillyTavernNonStreamingReply);
+});
+
+function usageObservationHarness() {
+    const user = '缓存统计离线测试中的正文输入。';
+    const h = harness({ chat: [{ is_user: true, mes: user }] });
+    const request = h.call('recordRealRequest', JSON.stringify({ type: 'normal', model: 'offline-fixture', stream: true,
+        messages: [{ role: 'user', content: user }] }));
+    return { h, request };
+}
+
+test('multiline split SSE merges Anthropic raw snapshots, retains input buckets and accepts an explicit zero', async () => {
+    const { h, request } = usageObservationHarness();
+    const start = { message: { usage: { input_tokens: 100, cache_read_input_tokens: 500, cache_creation_input_tokens: 200 } } };
+    const multiline = JSON.stringify(start, null, 2).split('\n').map(line => `data: ${line}`).join('\n');
+    const wire = `event: message_start\n${multiline}\n\n` + `event: message_start\n${multiline}\n\n`
+        + 'event: message_delta\ndata: {"usage":{"input_tokens":120}}\n\n'
+        + 'event: message_delta\ndata: {"usage":{"cache_read_input_tokens":0}}\n\n';
+    const bytes = new TextEncoder().encode(wire);
+    const response = new Response(new ReadableStream({ start(controller) {
+        for (let at = 0; at < bytes.length; at += 11) controller.enqueue(bytes.slice(at, at + 11));
+        controller.close();
+    } }));
+    await h.call('observeUsage', response, request);
+    assert.match(h.call('settings').lastUsageReport, /缓存 token：0 \/ 输入 320（0\.0%）/);
+    assert.equal(response.bodyUsed, false);
+    assert.equal(await response.text(), wire);
+});
+
+test('SSE camel and snake aliases update the same snapshot and zero replaces a prior positive count', async () => {
+    const { h, request } = usageObservationHarness();
+    const wire = 'data: {"usageMetadata":{"promptTokenCount":1000,"cachedContentTokenCount":100}}\n\n'
+        + 'data: {"usage_metadata":{"prompt_token_count":1000,"cached_content_token_count":0}}\n\n';
+    const response = new Response(wire, { headers: { 'content-type': 'text/event-stream' } });
+    await h.call('observeUsage', response, request);
+    assert.match(h.call('settings').lastUsageReport, /缓存 token：0 \/ 输入 1000（0\.0%）/);
+    let snapshot = h.call('extractUsageSnapshot', { usageMetadata: { promptTokenCount: 1000, cachedContentTokenCount: 100 } });
+    snapshot = h.call('mergeUsageSnapshot', snapshot, h.call('extractUsageSnapshot', { usage_metadata: { cached_content_token_count: 0 } }));
+    assert.match(h.call('describeUsageSources', snapshot, h.call('calculateUsage', snapshot)), /usage_metadata\.cached_content_token_count = 0/);
+    const openai = usageObservationHarness();
+    const aliases = 'data: {"usage":{"prompt_tokens":1000,"prompt_tokens_details":{"cached_tokens":100}}}\n\n'
+        + 'data: {"usage":{"input_tokens_details":{"cached_tokens":0}}}\n\n';
+    await openai.h.call('observeUsage', new Response(aliases, { headers: { 'content-type': 'text/event-stream' } }), openai.request);
+    assert.match(openai.h.call('settings').lastUsageReport, /缓存 token：0 \/ 输入 1000（0\.0%）/);
+});
+
+test('Gemini observed 47051 / 64305 remains 73.2 percent and inconsistent counts never display a ratio', async () => {
+    const { h, request } = usageObservationHarness();
+    request.body.stream = false;
+    const response = new Response(JSON.stringify({ usageMetadata: { promptTokenCount: 64305, cachedContentTokenCount: 47051 } }),
+        { headers: { 'content-type': 'application/json' } });
+    await h.call('observeUsage', response, request);
+    assert.match(h.call('settings').lastUsageReport, /47051 \/ 输入 64305（73\.2%）/);
+    const inconsistent = new Response(JSON.stringify({ usage: { prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 101 } } }));
+    await h.call('observeUsage', inconsistent, request);
+    const report = h.call('settings').lastUsageReport;
+    assert.match(report, /101 \/ 输入 100（统计不一致/);
+    assert.doesNotMatch(report, /%/);
+    assert.equal(inconsistent.bodyUsed, false);
+});
+
+test('failed, oversized and unfinished SSE observations never present partial counts as final', async () => {
+    const first = 'data: {"usage":{"prompt_tokens":1000,"prompt_tokens_details":{"cached_tokens":500}}}\n\n';
+    const sources = [
+        () => new ReadableStream({ start(controller) {
+            controller.enqueue(new TextEncoder().encode(first));
+        }, pull(controller) { controller.error(new Error('offline broken stream')); } }),
+        () => new ReadableStream({ start(controller) {
+            controller.enqueue(new TextEncoder().encode(first + 'data: ' + 'x'.repeat(4 * 1024 * 1024 + 1) + '\n\n'));
+            controller.close();
+        } }),
+        () => new ReadableStream({ start(controller) {
+            controller.enqueue(new TextEncoder().encode(first + 'data: {"usage":'));
+            controller.close();
+        } }),
+        ...['data: {"error":{"message":"offline failure"}}\n\n', 'event: error\ndata: {}\n\n', 'data: {broken-json}\n\n']
+            .map(tail => () => new ReadableStream({ start(controller) {
+                controller.enqueue(new TextEncoder().encode(first + tail));
+                controller.close();
+            } })),
+    ];
+    for (const source of sources) {
+        const { h, request } = usageObservationHarness();
+        const response = new Response(source());
+        await h.call('observeUsage', response, request);
+        const report = h.call('settings').lastUsageReport;
+        assert.match(report, /未完成/);
+        assert.doesNotMatch(report, /%|缓存 token：500/);
+        assert.equal(response.bodyUsed, false);
+    }
 });
 
 test('the free-check guide never generates a response or changes live chat messages', async () => {

@@ -687,53 +687,140 @@ function recordRealRequest(rawBody) {
     return cur;
 }
 
-/** 缺失统计与明确返回 0 严格分开；只读取响应，不推算 token。 */
-function readUsage(payload) {
+const CACHE_USAGE_FIELDS = ['cachedContentTokenCount', 'cached_content_token_count',
+    'prompt_tokens_details.cached_tokens', 'input_tokens_details.cached_tokens',
+    'cache_read_input_tokens', 'total_cached_tokens', 'prompt_cache_hit_tokens'];
+const INPUT_USAGE_FIELDS = ['promptTokenCount', 'prompt_token_count', 'toolUsePromptTokenCount',
+    'tool_use_prompt_token_count', 'prompt_tokens', 'input_tokens', 'total_input_tokens', 'cache_creation_input_tokens'];
+const usageNumber = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+
+function extractUsageSnapshot(payload, previousProtocol = null, eventType = '') {
     if (!payload || typeof payload !== 'object') return null;
-    const usage = payload.usageMetadata ?? payload.usage_metadata ?? payload.usage;
-    if (!usage || typeof usage !== 'object') return null;
-    const count = (...values) => values.find(v => typeof v === 'number' && Number.isFinite(v) && v >= 0) ?? null;
-    const cached = count(usage.cachedContentTokenCount, usage.cached_content_token_count,
-        usage.prompt_tokens_details?.cached_tokens, usage.input_tokens_details?.cached_tokens,
-        usage.cache_read_input_tokens, usage.total_cached_tokens);
-    const total = count(usage.promptTokenCount, usage.prompt_token_count, usage.prompt_tokens, usage.input_tokens, usage.total_input_tokens);
-    return cached === null && total === null ? null : { cached, total };
+    const prefixes = ['usageMetadata', 'usage_metadata', 'message.usage', 'response.usage', 'usage'];
+    const get = path => path.split('.').reduce((object, key) => object?.[key], payload);
+    const prefix = prefixes.find(path => get(path) && typeof get(path) === 'object');
+    if (!prefix) return null;
+    const raw = get(prefix), values = {}, sources = {};
+    const canonical = { cached_content_token_count: 'cachedContentTokenCount', prompt_token_count: 'promptTokenCount', tool_use_prompt_token_count: 'toolUsePromptTokenCount' };
+    for (const field of [...CACHE_USAGE_FIELDS, ...INPUT_USAGE_FIELDS]) {
+        const value = field.split('.').reduce((object, key) => object?.[key], raw);
+        if (!usageNumber(value)) continue;
+        const key = canonical[field] ?? field;
+        if (key in values) continue;
+        values[key] = value;
+        sources[key] = `${prefix}.${field}`;
+    }
+    const cache = CACHE_USAGE_FIELDS.map(field => canonical[field] ?? field).find(field => usageNumber(values[field]));
+    if (cache) { values.cached = values[cache]; sources.cached = sources[cache]; }
+    const type = payload.type || eventType;
+    let protocol = previousProtocol ?? 'openai';
+    if (/^usage[M_]/.test(prefix) || ['promptTokenCount', 'cachedContentTokenCount'].some(key => key in values)) protocol = 'gemini';
+    else if (prefix === 'response.usage') protocol = 'openai';
+    else if (prefix === 'message.usage' || /^message_(?:start|delta|stop)$/.test(type)
+        || ['cache_read_input_tokens', 'cache_creation_input_tokens'].some(key => key in values)) protocol = 'anthropic';
+    else if ('prompt_tokens' in values || 'input_tokens_details.cached_tokens' in values) protocol = 'openai';
+    const inclusive = (protocol === 'anthropic' ? ['total_input_tokens', 'prompt_tokens']
+        : protocol === 'openai' ? ['prompt_tokens', 'input_tokens', 'total_input_tokens'] : []).find(key => key in values);
+    if (inclusive) { values.inclusive_input = values[inclusive]; sources.inclusive_input = sources[inclusive]; }
+    return { protocol, values, sources };
+}
+
+function mergeUsageSnapshot(previous, update) {
+    if (!update) return previous;
+    if (!previous || previous.protocol !== update.protocol) return update;
+    return { protocol: update.protocol, values: { ...previous.values, ...update.values }, sources: { ...previous.sources, ...update.sources } };
+}
+
+function calculateUsage(snapshot) {
+    if (!snapshot) return null;
+    const { values, sources, protocol } = snapshot;
+    const first = fields => fields.find(field => usageNumber(values[field]));
+    const cachedField = first(['cached']);
+    const cached = cachedField ? values[cachedField] : null;
+    let total = null, inputFields = [], formula = '';
+    if (protocol === 'gemini') {
+        const prompt = first(['promptTokenCount', 'prompt_token_count']);
+        const tool = first(['toolUsePromptTokenCount', 'tool_use_prompt_token_count']);
+        if (prompt) {
+            inputFields = [prompt, ...(tool ? [tool] : [])];
+            total = inputFields.reduce((sum, field) => sum + values[field], 0);
+            formula = inputFields.map(field => sources[field]).join(' + ');
+        }
+    } else if (protocol === 'anthropic') {
+        const explicit = first(['inclusive_input']);
+        if (explicit) { total = values[explicit]; inputFields = [explicit]; formula = sources[explicit]; }
+        else {
+            inputFields = ['input_tokens', 'cached', 'cache_creation_input_tokens'].filter(field => usageNumber(values[field]));
+            if (inputFields.length === 3) {
+                total = inputFields.reduce((sum, field) => sum + values[field], 0);
+                formula = inputFields.map(field => sources[field]).join(' + ');
+            }
+        }
+    } else {
+        const input = first(['inclusive_input']);
+        if (input) { total = values[input]; inputFields = [input]; formula = sources[input]; }
+    }
+    if (cached === null && total === null) return null;
+    return { cached, total, cachedField, inputFields, formula, inconsistent: cached !== null && total !== null && cached > total };
+}
+
+/** Protocol input totals already include cache except Anthropic's native separate buckets. */
+function readUsage(payload) {
+    const value = calculateUsage(extractUsageSnapshot(payload));
+    return value ? { cached: value.cached, total: value.total } : null;
 }
 
 function identifiedUsageFields(payload) {
-    const prefix = ['usageMetadata', 'usage_metadata', 'usage'].find(key => payload?.[key] != null);
-    if (!prefix) return [];
-    const fields = [
-        'cachedContentTokenCount', 'cached_content_token_count',
-        'prompt_tokens_details.cached_tokens', 'input_tokens_details.cached_tokens',
-        'cache_read_input_tokens', 'total_cached_tokens',
-    ];
-    return fields.map(field => `${prefix}.${field}`).flatMap(path => {
-        const value = path.split('.').reduce((object, key) => object?.[key], payload);
-        return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? [`${path} = ${value}`] : [];
-    });
+    const snapshot = extractUsageSnapshot(payload);
+    return snapshot ? CACHE_USAGE_FIELDS.filter(field => field in snapshot.values)
+        .map(field => `${snapshot.sources[field]} = ${snapshot.values[field]}`) : [];
+}
+
+function describeUsageSources(snapshot, usage) {
+    if (!snapshot || !usage) return '响应未返回已识别的输入或缓存数字字段';
+    const fields = [usage.cachedField, ...usage.inputFields].filter(Boolean);
+    return [...new Set(fields)].map(field => `${snapshot.sources[field]} = ${snapshot.values[field]}`)
+        .concat(usage.formula ? [`输入分母 = ${usage.formula} = ${usage.total}`] : ['输入分母未知']).join('\n');
 }
 
 async function observeUsage(response, request) {
     if (!request || !response.ok) return;
-    let usage = null;
-    let cacheFields = [];
+    let snapshot = null, complete = false, incompleteReason = '响应读取失败';
     try {
         const copy = response.clone();
-        const accept = payload => {
-            const value = readUsage(payload);
-            if (value) usage = { cached: value.cached ?? usage?.cached ?? null, total: value.total ?? usage?.total ?? null };
-            const fields = identifiedUsageFields(payload);
-            if (fields.length) cacheFields = fields;
+        const accept = (payload, type = '') => {
+            snapshot = mergeUsageSnapshot(snapshot, extractUsageSnapshot(payload, snapshot?.protocol, type));
         };
         // 酒馆透传流式响应时可能没有 Content-Type；请求本身也能确认 SSE 模式。
         if (request.body?.stream === true || (copy.headers.get('content-type') ?? '').includes('text/event-stream')) {
             const reader = copy.body.getReader();
             const decoder = new TextDecoder();
-            let buffer = '';
+            const maxEventChars = 4 * 1024 * 1024;
+            let buffer = '', data = [], eventType = '', eventChars = 0, stopped = false;
             const line = value => {
-                if (!value.startsWith('data:')) return;
-                try { accept(JSON.parse(value.slice(5).trim())); } catch { /* DONE/非 JSON 帧 */ }
+                if (value === '') {
+                    const payload = data.join('\n').trim();
+                    if (eventType === 'error') { stopped = true; incompleteReason = '接口返回错误事件'; }
+                    else if (payload && payload !== '[DONE]' && payload !== 'ping' && eventType !== 'ping') {
+                        try {
+                            const parsed = JSON.parse(payload);
+                            if (parsed?.error != null || parsed?.response?.error != null
+                                || ['error', 'response.failed', 'response.incomplete'].includes(parsed?.type)) {
+                                stopped = true; incompleteReason = '接口返回错误事件';
+                            } else accept(parsed, eventType);
+                        } catch { stopped = true; incompleteReason = 'SSE 数据事件无法解析'; }
+                    }
+                    data = []; eventType = ''; eventChars = 0;
+                    return;
+                }
+                eventChars += value.length;
+                if (eventChars > maxEventChars) { stopped = true; incompleteReason = 'SSE 事件过大，已停止观察'; return; }
+                const colon = value.indexOf(':');
+                const field = colon < 0 ? value : value.slice(0, colon);
+                let content = colon < 0 ? '' : value.slice(colon + 1);
+                if (content.startsWith(' ')) content = content.slice(1);
+                if (field === 'data') data.push(content);
+                if (field === 'event') eventType = content;
             };
             try {
                 while (true) {
@@ -743,23 +830,32 @@ async function observeUsage(response, request) {
                     while ((end = buffer.indexOf('\n')) >= 0) {
                         line(buffer.slice(0, end).replace(/\r$/, ''));
                         buffer = buffer.slice(end + 1);
+                        if (stopped) break;
                     }
-                    // 异常或超大 SSE 单帧时停止观察，不影响原响应。
-                    if (buffer.length > 4 * 1024 * 1024) { void reader.cancel(); break; }
-                    if (done) { if (buffer) line(buffer); break; }
+                    if (buffer.length + eventChars > maxEventChars) { stopped = true; incompleteReason = 'SSE 事件过大，已停止观察'; }
+                    if (stopped) { void reader.cancel().catch(() => {}); break; }
+                    if (done) {
+                        if (buffer || data.length) incompleteReason = 'SSE 事件未完整结束';
+                        else complete = true;
+                        break;
+                    }
                 }
             } finally { reader.releaseLock(); }
-        } else accept(await copy.json());
+        } else { accept(await copy.json()); complete = true; }
     } catch { /* 原响应继续交给酒馆；旁观失败不能被算作 0 */ }
     if (ctx().getCurrentChatId?.() !== request.chatId || recentReal.at(-1) !== request) return;
-    const ratio = usage?.cached !== null && usage?.cached !== undefined && usage?.total > 0
+    const usage = calculateUsage(snapshot);
+    const ratio = usage?.cached !== null && usage?.cached !== undefined && usage?.total > 0 && !usage.inconsistent
         ? `（${(usage.cached / usage.total * 100).toFixed(1)}%）` : '';
-    const report = `${request.body.model ?? '当前正文模型'}｜API 缓存 token：${usage?.cached ?? '未知（响应未返回缓存字段）'}`
-        + `${usage?.total !== null && usage?.total !== undefined ? ` / 输入 ${usage.total}` : ''}${ratio}`;
+    const report = `${request.body.model ?? '当前正文模型'}｜` + (complete
+        ? `API 缓存 token：${usage?.cached ?? '未知（响应未返回缓存字段）'}`
+            + `${usage?.total !== null && usage?.total !== undefined ? ` / 输入 ${usage.total}` : ''}`
+            + (usage?.inconsistent ? '（统计不一致：缓存大于总输入）' : ratio)
+        : `API 缓存统计：未完成（${incompleteReason}）；部分统计不作为最终结果。`);
     settings().lastUsageReport = report;
     save();
     $('#cacheopt_usage').text(report);
-    $('#cacheopt_usage').attr('title', cacheFields.length ? cacheFields.join('\n') : '响应未返回已识别的缓存数字字段');
+    $('#cacheopt_usage').attr('title', `${complete ? '' : '未完成，以下仅为部分字段\n'}${describeUsageSources(snapshot, usage)}`);
 }
 
 function recordRequestFailure(request) {

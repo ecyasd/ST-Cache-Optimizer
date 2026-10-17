@@ -10,6 +10,16 @@
 
 用户随后明确不使用泉的记忆功能。因此下文关于 `IZM7` 的内容仅是可选功能的静态审计证据，不作为本次实际使用的故障原因；本版 `compatIzumi` 默认关闭。普通 Izumi 预设和数据库召回仍按各自实际来源处理。
 
+## 2.6.2 响应用量归一化
+
+本版只修改本地响应统计，不修改请求布局、模型连接或缓存开关。静态参考固定 SHA `3e2ce2c8856e32ca7054d673f8cd059ae466e80c` 的 [new-api 用量归一化](https://github.com/QuantumNous/new-api/blob/3e2ce2c8856e32ca7054d673f8cd059ae466e80c/relaykit/dto/billing_usage.go#L318-L343)与[累计快照合并语义](https://github.com/QuantumNous/new-api/blob/3e2ce2c8856e32ca7054d673f8cd059ae466e80c/relaykit/dto/usage_merge.go#L215)，独立实现统计逻辑；未复制引入 new-api 代码或依赖，未部署、运行或接入其服务。
+
+Gemini 缓存占比的输入分母为 `promptTokenCount + toolUsePromptTokenCount`，分子为 `cachedContentTokenCount`。OpenAI 的 `prompt_tokens` 已含缓存输入，不能再加一次缓存数。Claude 的总输入为 `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`，缓存创建与缓存读取分开。还处理 DeepSeek 根级缓存统计及嵌套 `usage`。
+
+JSON 中字段缺失仍为未知，不照搬 Go 默认整数零值。SSE 的累计用量快照按字段是否存在合并，保留明确零值与缺失值的区别，不能把多帧快照相加。缓存数大于输入时保留异常原值，不以 100% 截断隐藏不一致；异常流显示未完成，不能冒充完整响应统计。
+
+本版的 48 项离线回归测试、语法与差异检查通过，并完成最终审查，没有新增付费模型请求。历史 73.2% 缓存伴随空正文、Vertex 组 5 次有正文与 2 次空正文、实验开关关闭等事实保持不变；用量解析改进不等于修复空正文或提高服务端命中率。
+
 ## 2.6.1 固定头布局实验
 
 新增 `compatGeminiProxy` 开关，默认关闭。它仅在 `custom`、`vertexai`、`makersuite` 来源且模型名含 `gemini` 的普通正文请求上尝试布局调整：先确认真实历史，将其前部静态 system 消息合并为开头的一条 system；历史之后的 system 消息保持原位置、改为 user。除原本开头的 system 外，迁移来源的原位置替换为固定 user 占位 `【固定规则已置于系统指令】`，防止原本被 system 隔开的签名消息在酒馆后处理时合并。合并保持各原 system 正文的内部文字与相互顺序，但会越过前部预设伪对话，并降低后部资料的提示优先级，因此不等同于语义完全不变。
