@@ -11,6 +11,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 
 function harness(overrides = {}) {
     const host = {
+        mainApi: 'openai',
         extensionSettings: {}, chatCompletionSettings: { chat_completion_source: 'vertexai' },
         extensionPrompts: {}, chat: [], saveSettingsDebounced() {}, ...overrides,
     };
@@ -160,17 +161,17 @@ test('candidate filters and activation metadata belong only to their original en
     assert.deepEqual(scan(rows, { trigger: 'normal' }), []);
 });
 
-test('sticky and top-depth paths do not manufacture always-active wrapper entries', () => {
+test('Vertex ignores sticky mode and top-depth routing creates no artificial activations', () => {
     const h = harness({ chatCompletionSettings: {
-        chat_completion_source: 'custom',
+        chat_completion_source: 'vertexai',
         prompt_order: [{ character_id: 100001, order: [{ identifier: 'chatHistory' }, { identifier: 'worldInfoBefore' }] }],
     } });
     h.settings({ stickyLore: true, stickyTurns: 6 });
     const rows = [entry(), entry({ uid: 2, constant: true, order: 200 })];
     h.route(rows);
     assert.equal(rows.length, 2);
-    assert.equal(rows[0].depth, 10000);
-    assert.equal(rows[0].sticky, 6);
+    assert.equal(rows[0].depth, 0);
+    assert.equal(rows[0].sticky, undefined);
     assert.equal(rows[1].depth, 10000);
     assert.deepEqual(scan(rows).map(item => item.uid), [2]);
 });

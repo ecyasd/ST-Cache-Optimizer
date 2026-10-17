@@ -12,6 +12,7 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 
 function harness(overrides = {}) {
     const host = {
+        mainApi: 'openai',
         extensionSettings: {},
         chatCompletionSettings: { chat_completion_source: 'vertexai', use_sysprompt: true },
         chat: [],
@@ -365,7 +366,7 @@ test('official processed history confirms regex-filtered narrative while excludi
         { role: 'user', content: user },
     ]);
     // A late template extension can rebuild the array, losing all object identity.
-    const final = { type: 'normal', messages: structuredClone(prepared) };
+    const final = { type: 'normal', chat_completion_source: 'vertexai', messages: structuredClone(prepared) };
     h.call('onSettingsReady', final);
     assert.deepEqual(plain(h.call('findHistoryRange', final.messages)), { start: 4, end: 5 });
     assert.equal(final.messages.at(-1).content, injection);
@@ -419,7 +420,7 @@ test('processed assistant provenance keeps runtime systems outside the fixed hea
     h.call('onPromptReady', data);
     assert.equal(h.evaluate('processedHistorySnapshot.entries.length'), 2);
     assert.deepEqual(data.chat, prepared, 'PROMPT_READY only observes provenance');
-    h.call('onSettingsReady', { type: 'normal', messages: data.chat });
+    h.call('onSettingsReady', { type: 'normal', chat_completion_source: 'vertexai', messages: data.chat });
     assert.deepEqual(plain(h.call('findHistoryRange', data.chat)), { start: 3, end: 4 });
     assert.equal(data.chat.at(-1).content, runtime);
     const body = { type: 'normal', chat_completion_source: 'vertexai', model: 'gemini-3.1-flash-lite', messages: data.chat };
@@ -510,8 +511,10 @@ test('processed history permits only known name prefixes, never arbitrary instru
     const malicious = `${'附加世界书指令不可作为实际历史。'.repeat(30)}: ${raw}`;
     assert.equal(h.call('hasRawHistoryWitness', { role: 'assistant', content: malicious }), false);
     assert.equal(h.call('matchesHistoryText', { role: 'assistant', content: malicious }, { role: 'assistant', content: raw }), false);
+    assert.equal(h.call('hasRawHistoryWitness', { role: 'assistant', content: `旅客: ${raw}` }), false);
+    assert.equal(h.call('matchesHistoryText', { role: 'assistant', content: `旅客: ${raw}` }, { role: 'assistant', content: raw }), false);
+    h.host.chatCompletionSettings.names_behavior = 2;
     assert.equal(h.call('hasRawHistoryWitness', { role: 'assistant', content: `旅客: ${raw}` }), true);
-    assert.equal(h.call('matchesHistoryText', { role: 'assistant', content: `旅客: ${raw}` }, { role: 'assistant', content: raw }), true);
 });
 
 test('processed history uses the current exported promptManager after host initialization or API switches', () => {
@@ -545,7 +548,7 @@ test('Gemini proxy compatibility makes one large stable system head while retain
         const dynamic = databaseRecall(`本轮召回和状态 ${i + 1}`);
         h.host.chat = [{ is_user: true, mes: user }];
         const raw = structuredClone(h.host.chat);
-        const body = { type: 'normal', chat_completion_source: ['custom', 'vertexai', 'makersuite'][i], model: 'build-gemini-3.8-flash',
+        const body = { type: 'normal', chat_completion_source: 'vertexai', model: 'gemini-offline',
             tools: null, tool_choice: null, response_format: null,
             messages: [
                 { role: 'system', content: first },
@@ -580,7 +583,7 @@ test('Gemini proxy compatibility skips auxiliary, other connections, unsafe role
     const user = '这是用于确认主聊天的真实用户输入。';
     const h = harness({ chat: [{ is_user: true, mes: user }] });
     h.call('settings').compatGeminiProxy = true;
-    const make = () => ({ type: 'normal', chat_completion_source: 'custom', model: 'gemini-proxy', messages: [
+    const make = () => ({ type: 'normal', chat_completion_source: 'vertexai', model: 'gemini-proxy', messages: [
         { role: 'system', content: rolePreset }, { role: 'user', content: user },
         { role: 'system', content: databaseRecall('保持实时召回。') },
     ] });
@@ -615,7 +618,7 @@ test('Gemini compatibility transport excludes marked auxiliary fetches and prese
     const user = '我提出本轮新的问题，继续推进当前角色的故事。';
     const h = harness({ chat: [{ is_user: true, mes: user }] });
     h.call('settings').compatGeminiProxy = true;
-    const body = { type: 'normal', chat_completion_source: 'custom', model: 'gemini-proxy', messages: [
+    const body = { type: 'normal', chat_completion_source: 'vertexai', model: 'gemini-proxy', messages: [
         { role: 'system', content: '首条系统规则。' },
         { role: 'assistant', content: fakeAssistant },
         { role: 'system', content: rolePreset },
@@ -624,6 +627,7 @@ test('Gemini compatibility transport excludes marked auxiliary fetches and prese
     ] };
     const replies = [], forwarded = [];
     h.window.fetch = async (url, init) => { forwarded.push({ url, init }); const r = new Response('{}'); replies.push(r); return r; };
+    beginMainGeneration(h);
     h.call('watchRealRequests');
     const original = { method: 'POST', headers: { 'x-test': 'preserved' }, body: JSON.stringify(body) };
     const first = await h.window.fetch('/api/backends/chat-completions/generate', original);
@@ -644,7 +648,7 @@ test('Gemini compatibility preserves inherited and non-enumerable RequestInit di
     const user = '我继续向前走，并询问月台前的工作人员下一班车何时抵达。';
     const h = harness({ chat: [{ is_user: true, mes: user }] });
     h.call('settings').compatGeminiProxy = true;
-    const body = { type: 'normal', chat_completion_source: 'custom', model: 'gemini-proxy', messages: [
+    const body = { type: 'normal', chat_completion_source: 'vertexai', model: 'gemini-proxy', messages: [
         { role: 'system', content: rolePreset }, { role: 'user', content: user },
         { role: 'system', content: databaseRecall('这一轮的最新资料。') },
     ] };
@@ -656,6 +660,7 @@ test('Gemini compatibility preserves inherited and non-enumerable RequestInit di
     const originalBody = init.body;
     let forwarded;
     h.window.fetch = async (_url, received) => { forwarded = received; return new Response('{}'); };
+    beginMainGeneration(h);
     h.call('watchRealRequests');
     await h.window.fetch('/api/backends/chat-completions/generate', init);
     assert.notEqual(forwarded, init);
@@ -747,7 +752,7 @@ test('complete runtime records embedded in a merged system are separated without
         const parts = h.call('splitRuntimeSystemRecords', [{ role: 'system', content }]);
         assert.equal(parts.converted, 2);
         assert.equal(parts.messages.map(m => m.content).join(''), content, 'splitting retains every original character');
-        const body = { type: 'normal', chat_completion_source: 'custom', model: 'gemini-proxy', messages: [
+        const body = { type: 'normal', chat_completion_source: 'vertexai', model: 'gemini-proxy', messages: [
             { role: 'system', content }, { role: 'user', content: user },
         ] };
         assert.equal(h.call('applyGeminiProxyLayout', body).applied, true);
@@ -795,7 +800,7 @@ test('three advancing turns keep fixed preset and history before changing memory
         h.host.chat = histories.map(m => ({ is_user: m.role === 'user', is_system: false, mes: m.content }));
         const memory = izumiMemory(`这是第 ${turn + 1} 轮独有的记忆。`);
         const recall = databaseRecall(`这是第 ${turn + 1} 轮独有的数据库召回。`);
-        const data = { type: 'normal', messages: [
+        const data = { type: 'normal', chat_completion_source: 'vertexai', messages: [
             { role: 'system', content: `${rolePreset}\n${memory}\n固定输出规则。` },
             { role: 'user', content: fakeUser },
             { role: 'assistant', content: fakeAssistant },
@@ -840,7 +845,7 @@ test('ambiguous database wrappers and user-authored wrappers are preserved verba
     const h = harness({ chat: [{ is_user: true, mes: '这是真实用户的新一轮输入。' }] });
     const ambiguous = `${databaseRecall('第一段')}\n${databaseRecall('第二段')}`;
     const userAuthored = izumiMemory('用户正文中的引用，不是系统记忆注入。');
-    const data = { type: 'normal', messages: [
+    const data = { type: 'normal', chat_completion_source: 'vertexai', messages: [
         { role: 'system', content: ambiguous },
         { role: 'user', content: userAuthored },
         { role: 'user', content: '这是真实用户的新一轮输入。' },
@@ -892,7 +897,7 @@ test('the final hook is rearmed behind a database listener loaded later', async 
     beginMainGeneration(h);
     h.setPromptManager(nativeHistoryManager([{ identifier: 'chatHistory-0', role: 'user', content: userText }]));
     h.call('onPromptReady', { chat: [{ role: 'user', content: userText }], dryRun: false });
-    const data = { type: 'normal', messages: [] };
+    const data = { type: 'normal', chat_completion_source: 'vertexai', messages: [] };
     await eventSource.emit(data);
     assert.equal(data.messages.at(-1).content, recall);
     assert.equal(data.messages.at(-1).role, 'system');
@@ -959,7 +964,7 @@ test('a streaming request identifies SSE usage when SillyTavern omits Content-Ty
 test('non-streaming usage observer reports unknown without consuming SillyTavern reply', async () => {
     const h = harness({ chat: [{ is_user: true, mes: '正文用户输入。' }] });
     const request = h.call('recordRealRequest', JSON.stringify({
-        type: 'normal', model: 'gemini-4-argon', messages: [{ role: 'user', content: '正文用户输入。' }],
+        type: 'normal', chat_completion_source: 'vertexai', model: 'gemini-4-argon', messages: [{ role: 'user', content: '正文用户输入。' }],
     }));
     const response = new Response(JSON.stringify(sillyTavernNonStreamingReply), {
         headers: { 'content-type': 'application/json' },
@@ -974,7 +979,7 @@ test('non-streaming usage observer reports unknown without consuming SillyTavern
 function usageObservationHarness() {
     const user = '缓存统计离线测试中的正文输入。';
     const h = harness({ chat: [{ is_user: true, mes: user }] });
-    const request = h.call('recordRealRequest', JSON.stringify({ type: 'normal', model: 'offline-fixture', stream: true,
+    const request = h.call('recordRealRequest', JSON.stringify({ type: 'normal', chat_completion_source: 'vertexai', model: 'offline-fixture', stream: true,
         messages: [{ role: 'user', content: user }] }));
     return { h, request };
 }
@@ -1122,13 +1127,13 @@ test('a short user turn cannot match preset explanations or the same assistant w
     beginMainGeneration(h);
     h.setPromptManager(nativeHistoryManager([{ identifier: 'chatHistory-0', role: 'user', content: '继续' }]));
     h.call('onPromptReady', { chat: messages.map(message => ({ ...message })), dryRun: false });
-    h.call('onSettingsReady', { type: 'normal', messages });
+    h.call('onSettingsReady', { type: 'normal', chat_completion_source: 'vertexai', messages });
     assert.deepEqual(messages, original);
 
     const presetOnly = original.slice(0, -1);
     assert.equal(h.call('findHistoryRange', presetOnly), null);
     const presetSnapshot = structuredClone(presetOnly);
-    h.call('onSettingsReady', { type: 'normal', messages: presetOnly });
+    h.call('onSettingsReady', { type: 'normal', chat_completion_source: 'vertexai', messages: presetOnly });
     assert.deepEqual(presetOnly, presetSnapshot);
 });
 

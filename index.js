@@ -1,4 +1,4 @@
-// 缓存优化 v2.6.3：按来源路由数据库召回，在 SETTINGS_READY 再处理最终消息。
+// 缓存优化 v2.6.4：仅处理 Vertex 正文，按来源路由数据库召回。
 // 仅修改本轮扫描/请求副本；请求相似度和服务端缓存 token 分开报告。
 // 相同前缀能提高隐式缓存机会，但实际命中以 API 响应为准。
 
@@ -77,11 +77,19 @@ let generationHistorySnapshot = null;
 let nativeHistoryInterceptorSupported = false;
 let generationScope = null;
 
+function isVertexConnection(connection = null) {
+    if (connection) return connection.mainApi === 'openai' && connection.source === 'vertexai';
+    const c = ctx();
+    return c.mainApi === 'openai' && c.chatCompletionSettings?.chat_completion_source === 'vertexai';
+}
+
 function onGenerationStarted(type, options = {}, dryRun = false) {
     processedHistorySnapshot = null;
     generationHistorySnapshot = null;
+    const c = ctx();
     generationScope = {
-        chatId: ctx().getCurrentChatId(), type: type ?? 'normal', dryRun: !!dryRun,
+        chatId: c.getCurrentChatId(), type: type ?? 'normal', dryRun: !!dryRun,
+        connection: { mainApi: c.mainApi, source: c.chatCompletionSettings?.chat_completion_source },
         confirmed: false, worldInfoHandled: false, settingsHandled: false,
         auxiliary: typeof options.quiet_prompt === 'string' && !!options.quiet_prompt.trim(),
     };
@@ -94,7 +102,9 @@ function clearGenerationScope() {
 }
 
 function isMainGenerationScope() {
+    if (!isVertexConnection()) { clearGenerationScope(); return false; }
     return !!generationScope && generationScope.chatId === ctx().getCurrentChatId()
+        && isVertexConnection(generationScope.connection)
         && generationScope.confirmed && !generationScope.dryRun && !generationScope.auxiliary
         && ['normal', 'regenerate', 'swipe'].includes(generationScope.type);
 }
@@ -112,7 +122,7 @@ async function loadNativePromptManager() {
         const [openai, extensions] = await Promise.all([import('/scripts/openai.js'), import('/scripts/extensions.js')]);
         nativeOpenAIModule = openai;
         nativeHistoryInterceptorSupported = typeof extensions.runGenerationInterceptors === 'function';
-    } catch { /* Older hosts keep the conservative raw-chat fallback. */ }
+    } catch { /* 未确认正式历史钩子的宿主不授权请求整理；不以弱回退绕过来源确认。 */ }
 }
 
 function ctx() {
@@ -187,7 +197,7 @@ function systemBlocksGetMerged() {
 
 function routeEntries(lists) {
     const s = settings();
-    if (!s.enabled || !s.routeWorldInfo) return;
+    if (!isVertexConnection() || !s.enabled || !s.routeWorldInfo) return;
     const keep = keepRegex();
     // 有的预设把世界书位置排在聊天记录之后：那里的内容每轮都排在新消息后面，永远命中不了。
     // 这时固定设定改插到聊天记录最顶端（深度 TOP_DEPTH），不管预设怎么排都在聊天记录之前。
@@ -314,28 +324,26 @@ function captureGenerationHistory(chat, _contextSize, _abort, type) {
         chatId: ctx().getCurrentChatId(), pending: true, blocked,
         entries: blocked ? [] : chat.filter(message => message && !message.is_system
             && typeof message.mes === 'string' && message.mes.trim() && message.extra?.type !== 'narrator')
-            .map(message => ({ role: message.is_user ? 'user' : 'assistant', content: message.mes })),
+            .map(expectedHistoryEntry),
     };
 }
 globalThis.cacheOptimizerCaptureHistory = captureGenerationHistory;
 
-function historyNames() {
-    const c = ctx(), names = { user: new Set(), assistant: new Set() };
-    const add = (role, name) => {
-        if (typeof name === 'string' && name.trim() && name.length <= 80 && !/[\r\n]/.test(name)) names[role].add(normalize(name));
-    };
-    add('user', c.name1); add('assistant', c.name2);
-    for (const raw of c.chat ?? []) if (raw) add(raw.is_user ? 'user' : 'assistant', raw.name);
-    return names;
+function expectedHistoryEntry(message) {
+    const c = ctx(), behavior = c.chatCompletionSettings?.names_behavior ?? 0;
+    const narrator = message.extra?.type === 'narrator';
+    let content = message.mes;
+    // Match this host's setOpenAIMessages exactly. Source text stays literal:
+    // if it already starts "Name: ", CONTENT intentionally adds a second one.
+    const named = behavior === 2 && !narrator || behavior === 0
+        && ((c.groupId && message.name !== c.name1)
+            || (message.force_avatar && message.name !== c.name1 && !narrator));
+    if (named) content = `${message.name}: ${content}`;
+    return { role: narrator ? 'system' : message.is_user ? 'user' : 'assistant', content: content.replace(/\r/g, '') };
 }
 
-function processedHistoryText(message, names = historyNames()) {
-    const t = normalize(text(message));
-    for (const name of names[message.role] ?? []) {
-        const prefix = `${normalize(name)}: `;
-        if (t.startsWith(prefix)) return t.slice(prefix.length);
-    }
-    return t;
+function processedHistoryText(message) {
+    return normalize(text(message));
 }
 
 /** Numeric chatHistory identifiers also include depth injections in ST.
@@ -348,7 +356,7 @@ function hasRawHistoryWitness(message) {
     return (ctx().chat ?? []).some(raw => {
         if (!raw || raw.is_system || typeof raw.mes !== 'string'
             || (raw.is_user ? 'user' : 'assistant') !== message.role) return false;
-        const source = normalize(raw.mes);
+        const source = processedHistoryText(expectedHistoryEntry(raw));
         return source === t;
     });
 }
@@ -392,7 +400,7 @@ function captureProcessedHistory(manager, chat, dryRun = false) {
 
 function matchesHistoryText(message, item) {
     if (message.role !== item.role) return false;
-    const names = historyNames(), t = processedHistoryText(message, names), expected = processedHistoryText(item, names);
+    const t = processedHistoryText(message), expected = processedHistoryText(item);
     if (!t || !expected) return false;
     // Late rebuilding must retain the complete processed message. Quoted anchors
     // in a worldbook injection do not make that injection a history message.
@@ -401,16 +409,16 @@ function matchesHistoryText(message, item) {
 
 function alignHistorySequence(chat, entries, requiredRoles = [...new Set(entries.map(item => item.role))]) {
     if (!entries.length) return null;
-    const names = historyNames(), index = { user: new Map(), assistant: new Map() };
+    const index = { user: new Map(), assistant: new Map() };
     for (let i = 0; i < chat.length; i++) {
         const message = chat[i], byText = index[message.role];
         if (!byText) continue;
-        const canonical = processedHistoryText(message, names);
+        const canonical = processedHistoryText(message);
         if (!canonical) continue;
         if (!byText.has(canonical)) byText.set(canonical, []);
         byText.get(canonical).push(i);
     }
-    const expected = entries.map(item => ({ role: item.role, text: processedHistoryText(item, names) }));
+    const expected = entries.map(item => ({ role: item.role, text: processedHistoryText(item) }));
     const previous = (positions, before) => {
         let lo = 0, hi = positions.length;
         while (lo < hi) { const mid = (lo + hi) >>> 1; if (positions[mid] < before) lo = mid + 1; else hi = mid; }
@@ -456,7 +464,7 @@ function locateHistorySequence(chat, entries, requiredRoles) {
 function findRawHistoryRange(chat) {
     const entries = (ctx().chat ?? []).filter(message => message && !message.is_system
         && typeof message.mes === 'string' && message.mes.trim() && message.extra?.type !== 'narrator')
-        .map(message => ({ role: message.is_user ? 'user' : 'assistant', content: message.mes }));
+        .map(expectedHistoryEntry);
     return locateHistorySequence(chat, entries);
 }
 
@@ -586,6 +594,7 @@ function forgetLearned() {
 }
 
 function onPromptReady(data) {
+    if (!isVertexConnection()) { clearGenerationScope(); return; }
     armFinalHook();
     if (data?.dryRun) return;
     captureProcessedHistory(nativeOpenAIModule?.promptManager, data?.chat, data?.dryRun);
@@ -634,7 +643,9 @@ function confirmFinalHistory(chat) {
 }
 
 function onSettingsReady(data) {
+    if (!isVertexConnection()) { clearGenerationScope(); return; }
     if (!settings().enabled || !Array.isArray(data?.messages)
+        || data.chat_completion_source !== 'vertexai'
         || !['normal', 'regenerate', 'swipe'].includes(data.type)) return;
     if (!isMainGenerationScope()) {
         if (!generationScope || !generationScope.dryRun && !generationScope.auxiliary
@@ -670,7 +681,7 @@ function checkStability() {
         '连续楼层测试：保持同一角色卡、世界书、预设、正文模型和连接，正常聊天至少 3 轮，每轮输入不同内容，并让数据库照常召回。',
         '切换优化开关后分别观察至少 3 轮；不要将切换后的第一轮作为效果结论。数据库辅助模型请求不与正文请求配对。',
         '“重复请求”只说明重发相同内容；“连续楼层”才对应正常推进。相同字符前缀只是诊断，不是缓存 token 命中率。',
-        '实际缓存以 API 返回 cachedContentTokenCount / cached_tokens 为准。没有返回统计时显示“未知”，不能当成 0。',
+        '仅记录 Vertex 正文请求；数据库辅助请求保持原调用。实际缓存以 API 返回 cachedContentTokenCount 为准，缺失时为“未知”，不能当成 0。',
         'Vertex 建议启用流式输出：部分酒馆版本的非流式响应会丢失 usageMetadata。',
         '此按钮不截短历史、不触发生成，也不会额外消耗 API。',
     ].join('\n'));
@@ -721,8 +732,8 @@ function applyGeminiProxyLayout(body) {
     const skip = reason => ({ applied: false, reason });
     if (!settings().enabled || !settings().compatGeminiProxy) return skip('disabled');
     if (body?.type === 'continue') return skip('continue-prefill');
-    if (body?.type !== 'normal' || body?.[ACU_INTERNAL]) return skip('non-main');
-    if (!['custom', 'vertexai', 'makersuite'].includes(body.chat_completion_source)
+    if (!['normal', 'regenerate', 'swipe'].includes(body?.type) || body?.[ACU_INTERNAL]) return skip('non-main');
+    if (body.chat_completion_source !== 'vertexai'
         || !/gemini/i.test(String(body.model ?? ''))) return skip('connection');
     if (!Array.isArray(body.messages)) return skip('messages');
     if (['tools', 'functions'].some(key => body[key] != null && (!Array.isArray(body[key]) || body[key].length))
@@ -769,8 +780,8 @@ function applyGeminiProxyLayout(body) {
 
 function describeGeminiLayout(report) {
     return report.applied
-        ? `Gemini / Vertex 固定头强化：${report.mergedSystems} 条 system 集中为固定头 ${report.fixedHeadChars.toLocaleString()} 字，原位保留 ${report.fixedPlaceholders} 个固定标记，后部 ${report.convertedSystems} 条 system 转为 user（角色和规则顺序已调整；非缓存命中率）`
-        : `Gemini / Vertex 固定头强化：本次保守跳过（${report.reason}）`;
+        ? `Vertex 固定头强化：${report.mergedSystems} 条 system 集中为固定头 ${report.fixedHeadChars.toLocaleString()} 字，原位保留 ${report.fixedPlaceholders} 个固定标记，后部 ${report.convertedSystems} 条 system 转为 user（角色和规则顺序已调整；非缓存命中率）`
+        : `Vertex 固定头强化：本次保守跳过（${report.reason}）`;
 }
 
 function requestInitWithBody(init, body) {
@@ -830,9 +841,11 @@ function describeReal(prev, cur, gapSec) {
 }
 
 function recordRealRequest(rawBody) {
+    if (!isVertexConnection()) return null;
     let body;
     try { body = JSON.parse(rawBody); } catch { return null; }
-    if (!body || !Array.isArray(body.messages) || body.type === 'quiet' || !findHistoryRange(body.messages)) return null;
+    if (!body || body.chat_completion_source !== 'vertexai' || !Array.isArray(body.messages)
+        || body.type === 'quiet' || !findHistoryRange(body.messages)) return null;
     const chatId = ctx().getCurrentChatId?.() ?? '';
     const now = Date.now();
     const channel = JSON.stringify([body.chat_completion_source, body.model, body.type, body.reverse_proxy, body.custom_url]);
@@ -1075,16 +1088,18 @@ function watchRealRequests() {
                 if (typeof method === 'string' && method.toUpperCase() === 'POST' && !dataMember(ACU_INTERNAL)
                     && bodyDescriptor && Object.hasOwn(bodyDescriptor, 'value') && typeof bodyDescriptor.value === 'string') {
                     let rawBody = bodyDescriptor.value;
-                    if (settings().enabled && settings().compatGeminiProxy) {
-                        const body = JSON.parse(rawBody);
-                        const report = applyGeminiProxyLayout(body);
-                        if (report.applied) {
-                            rawBody = JSON.stringify(body);
-                            forwardedInit = requestInitWithBody(init, rawBody);
+                    const body = JSON.parse(rawBody);
+                    if (isVertexConnection() && body?.chat_completion_source === 'vertexai') {
+                        if (settings().enabled && settings().compatGeminiProxy && isMainGenerationScope()) {
+                            const report = applyGeminiProxyLayout(body);
+                            if (report.applied) {
+                                rawBody = JSON.stringify(body);
+                                forwardedInit = requestInitWithBody(init, rawBody);
+                            }
+                            $('#cacheopt_last').text(`${lastRun}\n${describeGeminiLayout(report)}`);
                         }
-                        $('#cacheopt_last').text(`${lastRun}\n${describeGeminiLayout(report)}`);
+                        request = recordRealRequest(rawBody);
                     }
-                    request = recordRealRequest(rawBody);
                 }
             }
         } catch { /* 只旁观，出错不影响请求 */ }
@@ -1108,7 +1123,7 @@ function setEnabled(value) {
     settings().enabled = value;
     save();
     $('#cacheopt_enabled').prop('checked', value);
-    $('#cacheopt_menu_label').text(`缓存优化：${value ? '开' : '关'}`);
+    $('#cacheopt_menu_label').text(`Vertex 缓存优化：${value ? '开' : '关'}`);
     $('#cacheopt_menu .extensionsMenuExtensionButton').css('opacity', value ? '' : '0.4');
 }
 
@@ -1129,19 +1144,21 @@ function renderSettings() {
     <div class="cacheopt-settings">
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <b>⚡ 缓存优化 2.6.3</b>
+          <b>⚡ Vertex 缓存优化 2.6.4</b>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
-          <label class="checkbox_label"><input id="cacheopt_enabled" type="checkbox"> 启用缓存优化</label>
+          <div class="cacheopt-hint">仅用于酒馆的 Vertex AI 渠道；其他渠道不整理请求、不记录统计，数据库辅助模型保持原调用。</div>
+          <div class="cacheopt-hint">需要支持正式 generate_interceptor 历史钩子及带生成类型的最终设置事件。未确认宿主来源时跳过整理，不猜测历史。</div>
+          <label class="checkbox_label"><input id="cacheopt_enabled" type="checkbox"> 启用 Vertex 缓存优化</label>
           <label class="checkbox_label"><input id="cacheopt_route" type="checkbox"> 世界书现场调整：关键词 / 会变的条目移到聊天中（不改文件）</label>
           <label class="checkbox_label"><input id="cacheopt_hoist" type="checkbox"> 固定规则条目前移进系统提示</label>
           <label class="checkbox_label"><input id="cacheopt_shujuku" type="checkbox"> 数据库召回兼容：纪要、索引、表头和包裹移到当前历史之后</label>
           <label class="checkbox_label"><input id="cacheopt_izumi" type="checkbox"> 泉记忆功能兼容（仅使用该功能时开启）</label>
-          <label class="checkbox_label"><input id="cacheopt_gemini_proxy" type="checkbox"> Gemini / Vertex 固定头强化（实验）：固定规则集中到开头，动态资料留在后部</label>
-          <div class="cacheopt-hint">用于自定义、Vertex 或 Google 接口的 Gemini 正文请求。会合并固定 system 并调整规则顺序，原位留下固定 user 标记，将后部 system 资料原位转为 user；可能影响预设服从程度。默认关闭，实际收益以 API 缓存 token 为准。</div>
-          <label class="checkbox_label"><input id="cacheopt_sticky" type="checkbox"> 关键词设定放到聊天记录前并保持
-            <input id="cacheopt_sticky_turns" class="text_pole cacheopt-num" type="number" min="1" max="50"> 条消息（场景稳定时更省，换场景那轮更贵；Gemini / Vertex 或开了提示词后处理时自动不生效）</label>
+          <label class="checkbox_label"><input id="cacheopt_gemini_proxy" type="checkbox"> Vertex 固定头强化（实验）：固定规则集中到开头，动态资料留在后部</label>
+          <div class="cacheopt-hint">仅用于 Vertex 的 Gemini 正文请求。会合并固定 system 并调整规则顺序，原位留下固定 user 标记，将后部 system 资料原位转为 user；可能影响预设服从程度。默认关闭，实际收益以 API 缓存 token 为准。</div>
+          <label class="checkbox_label"><input id="cacheopt_sticky" type="checkbox" disabled> 关键词前置保持（Vertex 渠道不适用，自动停用）
+            <input id="cacheopt_sticky_turns" class="text_pole cacheopt-num" type="number" min="1" max="50" disabled> 条消息</label>
           <label class="checkbox_label"><input id="cacheopt_learn" type="checkbox"> 自动学习系统提示里的易变块</label>
           <label class="cacheopt-label">保持原位的条目（正则，匹配条目名或内容开头）
             <input id="cacheopt_keep" class="text_pole" type="text">
@@ -1153,9 +1170,9 @@ function renderSettings() {
           <div id="cacheopt_learned" class="cacheopt-hint"></div>
           <div id="cacheopt_last" class="cacheopt-hint"></div>
           <div id="cacheopt_report" class="cacheopt-report">正常聊天后查看下方两项：请求前缀文本相似度、API 实际缓存 token。</div>
-          <div class="cacheopt-hint">真实发送对比（同聊天、同模型的相邻正文请求，排除已标记的数据库辅助请求）：</div>
+          <div class="cacheopt-hint">Vertex 真实发送对比（同聊天、同模型的相邻正文请求，排除已标记的数据库辅助请求）：</div>
           <div id="cacheopt_real" class="cacheopt-report">同一聊天连续发送两次后显示。</div>
-          <div id="cacheopt_usage" class="cacheopt-report">API 缓存统计：尚未收到正文响应。没有返回统计时为未知。</div>
+          <div id="cacheopt_usage" class="cacheopt-report">Vertex API 缓存统计：尚未收到正文响应。没有返回统计时为未知。</div>
         </div>
       </div>
     </div>`;
@@ -1185,11 +1202,11 @@ function renderSettings() {
 
     // 魔法棒菜单（左下角）一键开关，结构与酒馆自带的菜单项一致
     const item = $(`<div id="cacheopt_wand_container" class="extension_container interactable" tabindex="0">
-        <div id="cacheopt_menu" class="list-group-item flex-container flexGap5 interactable" tabindex="0" role="listitem" title="一键开关缓存优化">
+        <div id="cacheopt_menu" class="list-group-item flex-container flexGap5 interactable" tabindex="0" role="listitem" title="一键开关 Vertex 缓存优化">
           <div class="fa-solid fa-bolt extensionsMenuExtensionButton"></div><span id="cacheopt_menu_label"></span></div></div>`);
     item.on('click', () => {
         setEnabled(!settings().enabled);
-        toastr.info(`缓存优化已${settings().enabled ? '开启' : '关闭'}`, '缓存优化');
+        toastr.info(`Vertex 缓存优化已${settings().enabled ? '开启' : '关闭'}`, 'Vertex 缓存优化');
     });
     $('#extensionsMenu').append(item);
     setEnabled(settings().enabled);

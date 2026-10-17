@@ -11,7 +11,7 @@ const USER = '这是本地离线测试的当前用户输入，内容足够长，
 const ORIGIN = 'http://localhost:8000';
 
 function fixture() {
-    return { type: 'normal', model: 'gemini-offline', chat_completion_source: 'custom', stream: true, messages: [
+    return { type: 'normal', model: 'gemini-offline', chat_completion_source: 'vertexai', stream: true, messages: [
         { role: 'system', content: '固定系统规则。' },
         { role: 'user', content: USER },
         { role: 'system', content: '<最新数据与记录>当前一轮的动态资料。</最新数据与记录>' },
@@ -19,7 +19,7 @@ function fixture() {
 }
 
 function harness() {
-    const host = { extensionSettings: {}, chatCompletionSettings: { chat_completion_source: 'custom' },
+    const host = { mainApi: 'openai', extensionSettings: {}, chatCompletionSettings: { chat_completion_source: 'vertexai' },
         chat: [{ is_user: true, mes: USER }], getCurrentChatId: () => 'offline-transport',
         saveSettingsDebounced() {}, eventTypes: {}, eventSource: {} };
     const chain = new Proxy({}, { get: () => () => chain });
@@ -83,6 +83,8 @@ test('an auxiliary marker accessor is conservatively skipped without invoking it
 
 test('layout forwarding preserves non-enumerated Proxy dictionary fields, private getters and immutable original body', async () => {
     const h = harness();
+    h.call('onGenerationStarted', 'normal', {}, false);
+    h.call('captureGenerationHistory', h.host.chat, 100000, () => {}, 'normal');
     h.call('settings').compatGeminiProxy = true;
     const controller = new AbortController();
     const headers = { 'x-offline-test': 'preserved' };
@@ -123,6 +125,8 @@ test('layout forwarding preserves non-enumerated Proxy dictionary fields, privat
 
 test('only the exact same-origin generation endpoint with an explicit POST is observed or modified', async () => {
     const h = harness();
+    h.call('onGenerationStarted', 'normal', {}, false);
+    h.call('captureGenerationHistory', h.host.chat, 100000, () => {}, 'normal');
     h.call('settings').compatGeminiProxy = true;
     const raw = JSON.stringify(fixture());
     const skipped = [
