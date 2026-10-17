@@ -365,8 +365,10 @@ test('official processed history confirms regex-filtered narrative while excludi
         { role: 'assistant', content: narrative },
         { role: 'user', content: user },
     ]);
-    // A late template extension can rebuild the array, losing all object identity.
-    const final = { type: 'normal', chat_completion_source: 'vertexai', messages: structuredClone(prepared) };
+    // Native Vertex filtering and late template injection can rebuild the array
+    // while retaining each confirmed history object. Cloning is a separate
+    // unsupported case covered by the identity provenance regression tests.
+    const final = { type: 'normal', chat_completion_source: 'vertexai', messages: data.chat.slice() };
     h.call('onSettingsReady', final);
     assert.deepEqual(plain(h.call('findHistoryRange', final.messages)), { start: 4, end: 5 });
     assert.equal(final.messages.at(-1).content, injection);
@@ -806,14 +808,14 @@ test('three advancing turns keep fixed preset and history before changing memory
             { role: 'assistant', content: fakeAssistant },
             ...histories.map(m => ({ ...m })),
         ] };
-        // Model a database/template extension rebuilding messages at SETTINGS_READY
-        // after the early PROMPT_READY pass has already happened.
+        beginMainGeneration(h);
+        h.setPromptManager(nativeHistoryManager(histories.map((message, i) => ({ ...message, identifier: `chatHistory-${i}` }))));
+        h.call('onPromptReady', { chat: data.messages, dryRun: false });
+        // A late database/template listener inserts new material into a new
+        // array, preserving the native history objects already witnessed.
         data.messages = [
             ...data.messages.slice(0, 3), { role: 'system', content: recall }, ...data.messages.slice(3),
         ];
-        beginMainGeneration(h);
-        h.setPromptManager(nativeHistoryManager(histories.map((message, i) => ({ ...message, identifier: `chatHistory-${i}` }))));
-        h.call('onPromptReady', { chat: histories.map(message => ({ ...message })), dryRun: false });
         h.call('onSettingsReady', data);
         const messages = data.messages;
         const latestUserIndex = messages.findIndex(m => m.content === inputs[turn]);
@@ -892,12 +894,13 @@ test('the final hook is rearmed behind a database listener loaded later', async 
     h.call('armFinalHook');
     const recall = databaseRecall('数据库最终一刻重建的召回。');
     eventSource.on('settings', data => {
-        data.messages = [{ role: 'system', content: `${rolePreset}\n${recall}` }, { role: 'user', content: userText }];
+        data.messages = [{ role: 'system', content: `${rolePreset}\n${recall}` }, ...data.messages];
     });
     beginMainGeneration(h);
     h.setPromptManager(nativeHistoryManager([{ identifier: 'chatHistory-0', role: 'user', content: userText }]));
-    h.call('onPromptReady', { chat: [{ role: 'user', content: userText }], dryRun: false });
-    const data = { type: 'normal', chat_completion_source: 'vertexai', messages: [] };
+    const nativeHistory = [{ role: 'user', content: userText }];
+    h.call('onPromptReady', { chat: nativeHistory, dryRun: false });
+    const data = { type: 'normal', chat_completion_source: 'vertexai', messages: nativeHistory.slice() };
     await eventSource.emit(data);
     assert.equal(data.messages.at(-1).content, recall);
     assert.equal(data.messages.at(-1).role, 'system');

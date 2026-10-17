@@ -130,8 +130,9 @@ test('late rebuilding preserves complete wrapped user input and drops unknown re
     const wrapped = `以下是用户的本轮输入\n<本轮用户输入>${user}</本轮用户输入>\n数据库召回：纪要甲。`;
     const h = harness([{ is_user: false, mes: assistant }, { is_user: true, mes: wrapped }]);
     h.start([{ is_user: false, mes: assistant }, { is_user: true, mes: wrapped }]);
-    h.prompt([{ role: 'assistant', content: assistant }, { role: 'user', content: wrapped }]);
-    const rebuilt = [{ role: 'assistant', content: assistant }, { role: 'system', content: '本轮状态。' }, { role: 'user', content: wrapped }];
+    const prepared = [{ role: 'assistant', content: assistant }, { role: 'user', content: wrapped }];
+    h.prompt(prepared);
+    const rebuilt = [prepared[0], { role: 'system', content: '本轮状态。' }, prepared[1]];
     h.call('onSettingsReady', { type: 'normal', chat_completion_source: 'vertexai', messages: rebuilt });
     assert.equal(rebuilt.at(-1).content, '本轮状态。');
     assert.equal(h.call('findHistoryRange', [{ role: 'assistant', content: assistant }, { role: 'user', content: `${wrapped}\n未知扩展的新增文本。` }]), null);
@@ -171,11 +172,11 @@ test('continue preserves assistant prefill and reports an explicit unsupported s
 test('missing main provenance reports a skip while quiet helpers preserve the main report', () => {
     const h = harness(raw()); h.call('onGenerationStarted', 'normal', {}, false);
     h.prompt(actual()); assert.match(h.evaluate('lastRun'), /未收到当前宿主历史来源/);
-    h.start(core()); h.prompt(actual()); const mainReport = h.evaluate('lastRun');
+    h.start(core()); const mainHistory = actual(); h.prompt(mainHistory); const mainReport = h.evaluate('lastRun');
     const helper = [{ role: 'user', content: '整理纪要的辅助指令。' }];
     h.prompt(helper); h.call('onSettingsReady', { type: 'quiet', messages: helper });
     assert.equal(h.evaluate('lastRun'), mainReport);
-    const mainFinal = [actual()[0], { role: 'system', content: '等待最终处理的主请求状态。' }, actual()[1]];
+    const mainFinal = [mainHistory[0], { role: 'system', content: '等待最终处理的主请求状态。' }, mainHistory[1]];
     h.call('onSettingsReady', { type: 'normal', chat_completion_source: 'vertexai', messages: mainFinal });
     assert.equal(mainFinal.at(-1).content, '等待最终处理的主请求状态。');
     h.start(core()); h.prompt(helper); h.call('onSettingsReady', { type: 'normal', chat_completion_source: 'vertexai', messages: helper });
@@ -183,12 +184,12 @@ test('missing main provenance reports a skip while quiet helpers preserve the ma
 });
 
 test('a raw helper containing the full main history stays unchanged until typed main settings', () => {
-    const h = harness(raw()); h.start(core()); h.prompt(actual());
+    const h = harness(raw()); h.start(core()); const mainHistory = actual(); h.prompt(mainHistory);
     const helper = [actual()[0], { role: 'system', content: '数据库辅助模板自己的中间指令。' }, actual()[1]];
     const before = structuredClone(helper); h.prompt(helper);
     h.call('onSettingsReady', { type: 'quiet', messages: helper });
     assert.deepEqual(helper, before);
-    const main = [actual()[0], { role: 'system', content: '主请求最终动态状态。' }, actual()[1]];
+    const main = [mainHistory[0], { role: 'system', content: '主请求最终动态状态。' }, mainHistory[1]];
     h.call('onSettingsReady', { type: 'normal', chat_completion_source: 'vertexai', messages: main });
     assert.equal(main.at(-1).content, '主请求最终动态状态。');
 });
@@ -198,9 +199,9 @@ test('typed main settings restore complete official history after a helper used 
     const source = messages.map(message => ({ is_user: message.role === 'user', mes: message.content }));
     const h = harness(source); h.start(source); h.prompt(actual());
     assert.equal(h.evaluate('processedHistorySnapshot.entries.length'), 2);
-    h.prompt(structuredClone(messages));
+    const prepared = structuredClone(messages); h.prompt(prepared);
     const dynamic = { role: 'system', content: '较早历史之间的动态资料不能进入固定头。' };
-    const main = [messages[0], dynamic, ...messages.slice(1)];
+    const main = [prepared[0], dynamic, ...prepared.slice(1)];
     h.call('onSettingsReady', { type: 'normal', chat_completion_source: 'vertexai', messages: main });
     assert.deepEqual(plain(h.call('findHistoryRange', main)), { start: 0, end: 3 });
     assert.equal(main.at(-1), dynamic);

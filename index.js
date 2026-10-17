@@ -1,4 +1,4 @@
-// 缓存优化 v2.6.4：仅处理 Vertex 正文，按来源路由数据库召回。
+// 缓存优化 v2.6.5：仅处理 Vertex 正文，按来源路由数据库召回。
 // 仅修改本轮扫描/请求副本；请求相似度和服务端缓存 token 分开报告。
 // 相同前缀能提高隐式缓存机会，但实际命中以 API 响应为准。
 
@@ -76,6 +76,26 @@ let processedHistorySnapshot = null;
 let generationHistorySnapshot = null;
 let nativeHistoryInterceptorSupported = false;
 let generationScope = null;
+const generationDiagnostics = { sequence: 0, events: [] };
+
+function diagnosticGenerationType(type) {
+    return ['normal', 'regenerate', 'swipe', 'quiet', 'impersonate', 'continue'].includes(type) ? type : type == null ? 'missing' : 'other';
+}
+
+function noteGenerationEvent(event, details = {}) {
+    try {
+        if (!isVertexConnection()) return;
+        const c = ctx(), chatId = String(c.getCurrentChatId() ?? '');
+        let hash = 2166136261;
+        for (let i = 0; i < chatId.length; i++) hash = Math.imul(hash ^ chatId.charCodeAt(i), 16777619);
+        const entry = { n: ++generationDiagnostics.sequence, event, chat: (hash >>> 0).toString(16),
+            type: diagnosticGenerationType(generationScope?.type), scope: !!generationScope,
+            confirmed: !!generationScope?.confirmed, ...details };
+        generationDiagnostics.events = [...generationDiagnostics.events.slice(-29), entry];
+        $('#cacheopt_last').attr('title', generationDiagnostics.events.map(row => JSON.stringify(row)).join('\n'));
+        console.debug('[缓存优化诊断]', JSON.stringify(entry));
+    } catch { /* Diagnostic failures must not affect generation. No prompt text is logged. */ }
+}
 
 function isVertexConnection(connection = null) {
     if (connection) return connection.mainApi === 'openai' && connection.source === 'vertexai';
@@ -93,12 +113,38 @@ function onGenerationStarted(type, options = {}, dryRun = false) {
         confirmed: false, worldInfoHandled: false, settingsHandled: false,
         auxiliary: typeof options.quiet_prompt === 'string' && !!options.quiet_prompt.trim(),
     };
+    noteGenerationEvent('start', { dryRun: !!dryRun, auxiliary: generationScope.auxiliary });
 }
 
-function clearGenerationScope() {
+function clearGenerationScope(reason = 'reset') {
+    if (generationScope || generationHistorySnapshot) noteGenerationEvent(reason === 'ended' ? 'ended' : 'reset');
     generationScope = null;
     processedHistorySnapshot = null;
     generationHistorySnapshot = null;
+}
+
+function onGenerationStopped(generationId) {
+    // Native ST stopGeneration emits STOPPED without arguments. TavernHelper's
+    // generate/generateRaw emits the same host event with its string task ID;
+    // stopping database planning must not revoke the outer native generation.
+    if (typeof generationId === 'string' && generationId.length > 0) { noteGenerationEvent('stop-helper-id'); return; }
+    noteGenerationEvent('stop-native');
+    clearGenerationScope();
+}
+
+function onGenerationEnded() {
+    // TavernHelper's planning cleanup calls native activateSendButtons, which
+    // emits ENDED before the outer Generate reaches its official core hook.
+    // This preserves only a pending START; it grants no rewrite permission.
+    if (generationScope && !generationScope.confirmed && !generationHistorySnapshot
+        && !generationScope.dryRun && !generationScope.auxiliary
+        && generationScope.chatId === ctx().getCurrentChatId()
+        && isVertexConnection() && isVertexConnection(generationScope.connection)
+        && ['normal', 'regenerate', 'swipe'].includes(generationScope.type)) {
+        noteGenerationEvent('ended-before-core');
+        return;
+    }
+    clearGenerationScope('ended');
 }
 
 function isMainGenerationScope() {
@@ -122,7 +168,55 @@ async function loadNativePromptManager() {
         const [openai, extensions] = await Promise.all([import('/scripts/openai.js'), import('/scripts/extensions.js')]);
         nativeOpenAIModule = openai;
         nativeHistoryInterceptorSupported = typeof extensions.runGenerationInterceptors === 'function';
-    } catch { /* 未确认正式历史钩子的宿主不授权请求整理；不以弱回退绕过来源确认。 */ }
+        reportHostHookStatus(extensions);
+        await refreshOwnManifestCache(extensions);
+    } catch {
+        noteGenerationEvent('host-hook-import-failed');
+        /* 未确认正式历史钩子的宿主不授权请求整理；不以弱回退绕过来源确认。 */
+    }
+}
+
+function reportHostHookStatus(extensions) {
+    try {
+        const manifest = extensions.getExtensionManifest?.('ST-Cache-Optimizer');
+        const extension = extensions.findExtension?.('ST-Cache-Optimizer');
+        noteGenerationEvent('host-hook-status', {
+            loadedManifest: !!manifest,
+            loadedVersion: typeof manifest?.version === 'string' ? manifest.version.slice(0, 40) : null,
+            loadedHook: typeof manifest?.generate_interceptor === 'string' ? manifest.generate_interceptor.slice(0, 100) : null,
+            ownGlobalType: typeof globalThis.cacheOptimizerCaptureHistory,
+            ownGlobalMatches: globalThis.cacheOptimizerCaptureHistory === captureGenerationHistory,
+            hostInterceptorType: typeof extensions.runGenerationInterceptors,
+            extensionEnabled: typeof extension?.enabled === 'boolean' ? extension.enabled : null,
+        });
+    } catch { noteGenerationEvent('host-hook-status', { metadataReadFailed: true }); }
+}
+
+async function refreshOwnManifestCache(extensions) {
+    if (!isVertexConnection()) return 'other-connection';
+    try {
+        const loaded = extensions.getExtensionManifest?.('ST-Cache-Optimizer');
+        const extension = extensions.findExtension?.('ST-Cache-Optimizer');
+        if (!loaded || loaded.generate_interceptor === 'cacheOptimizerCaptureHistory') return 'not-needed';
+        if (extension?.enabled !== true || !/^(?:third-party\/)?ST-Cache-Optimizer$/i.test(extension.name ?? '')) return 'unknown-registration';
+        // Cocktail+ may preload old manifests with force-cache. Reload only our
+        // exact manifest URL, updating its HTTP cache for the next normal page
+        // load. Never mutate the host's private registry or other extensions.
+        const url = `/scripts/extensions/${extension.name.split('/').map(encodeURIComponent).join('/')}/manifest.json`;
+        const response = await window.fetch(url, { method: 'GET', credentials: 'same-origin', cache: 'reload' });
+        if (!response.ok) throw new Error('manifest-response');
+        const fresh = await response.json();
+        if (fresh?.generate_interceptor !== 'cacheOptimizerCaptureHistory' || fresh.js !== 'index.js') throw new Error('manifest-hook');
+        noteGenerationEvent('own-manifest-refreshed', { fetchedVersion: typeof fresh.version === 'string' ? fresh.version.slice(0, 40) : null });
+        lastRun = '宿主加载了本插件的旧清单；已刷新本插件清单缓存，请再次刷新酒馆页面后再生成。';
+        $('#cacheopt_last').text(lastRun);
+        return 'refreshed';
+    } catch {
+        noteGenerationEvent('own-manifest-refresh-failed');
+        lastRun = '宿主未加载本插件的历史钩子，自动刷新本插件清单缓存失败；请更新插件并完整刷新页面后再生成。';
+        $('#cacheopt_last').text(lastRun);
+        return 'failed';
+    }
 }
 
 function ctx() {
@@ -322,10 +416,12 @@ function captureGenerationHistory(chat, _contextSize, _abort, type) {
     const blocked = !isMainGenerationScope() || !Array.isArray(chat);
     generationHistorySnapshot = {
         chatId: ctx().getCurrentChatId(), pending: true, blocked,
+        identityWitnesses: new WeakMap(), identityGroups: [],
         entries: blocked ? [] : chat.filter(message => message && !message.is_system
             && typeof message.mes === 'string' && message.mes.trim() && message.extra?.type !== 'narrator')
             .map(expectedHistoryEntry),
     };
+    noteGenerationEvent('core', { suppliedType: diagnosticGenerationType(type), blocked, entries: generationHistorySnapshot.entries.length });
 }
 globalThis.cacheOptimizerCaptureHistory = captureGenerationHistory;
 
@@ -366,14 +462,14 @@ function captureProcessedHistory(manager, chat, dryRun = false) {
     const previous = currentProcessedHistory();
     if (!Array.isArray(chat)) return;
     const source = generationHistorySnapshot;
-    if (!source?.pending) {
+    if (!source) {
         // Helper generations do not pass the native coreChat interceptor. Do not
         // erase confirmed main provenance while its SETTINGS event is pending.
         // A different helper prompt still cannot match that complete sequence.
         if (nativeHistoryInterceptorSupported && !previous) processedHistorySnapshot = { chatId: ctx().getCurrentChatId(), entries: [], requiredRoles: [] };
         return;
     }
-    processedHistorySnapshot = { chatId: source.chatId, entries: [], requiredRoles: [] };
+    if (!previous) processedHistorySnapshot = { chatId: source.chatId, entries: [], requiredRoles: [] };
     if (source.blocked) { source.pending = false; return; }
     try {
         const collections = manager?.messages?.getCollection?.();
@@ -388,13 +484,26 @@ function captureProcessedHistory(manager, chat, dryRun = false) {
             && ['user', 'assistant'].includes(message.role) && typeof message.content === 'string'
             && !message.tool_calls && !message.tool_call_id)
             .map(message => ({ role: message.role, content: message.content }));
-        const located = alignHistorySequence(entries, source.entries);
+        const located = alignHistorySequence(entries, source.entries, undefined, true);
         if (!located) return;
         const selected = source.entries.slice(located.sourceStart);
         const requiredRoles = [...new Set(source.entries.map(item => item.role))];
-        if (!locateHistorySequence(chat, selected, requiredRoles)) return;
+        const prepared = alignHistorySequence(chat, selected, requiredRoles, true);
+        if (!prepared) return;
         source.pending = false;
         processedHistorySnapshot = { chatId: source.chatId, entries: selected, requiredRoles };
+        // Only a complete official core can carry identity across later in-place
+        // template edits. A helper's shorter budget must not shorten main history.
+        const identityCandidate = located.sourceStart === 0 && prepared.sourceStart === 0
+            && source.identityGroups.length < 8;
+        if (identityCandidate) {
+            const group = { count: source.entries.length };
+            source.identityGroups.push(group);
+            prepared.positions.forEach((position, index) => source.identityWitnesses.set(chat[position], {
+                group, index, role: source.entries[index].role,
+            }));
+        }
+        noteGenerationEvent('processed-confirmed', { entries: selected.length, identityCandidate });
     } catch { /* Unrecognized host collection shapes are not guessed. */ }
 }
 
@@ -407,7 +516,7 @@ function matchesHistoryText(message, item) {
     return t === expected;
 }
 
-function alignHistorySequence(chat, entries, requiredRoles = [...new Set(entries.map(item => item.role))]) {
+function alignHistorySequence(chat, entries, requiredRoles = [...new Set(entries.map(item => item.role))], uniqueSequence = false) {
     if (!entries.length) return null;
     const index = { user: new Map(), assistant: new Map() };
     for (let i = 0; i < chat.length; i++) {
@@ -442,14 +551,21 @@ function alignHistorySequence(chat, entries, requiredRoles = [...new Set(entries
     // neighboring turns. Accept only when earliest and latest valid alignments
     // have the same boundaries; a full quote outside history remains ambiguous.
     let after = -1, first;
+    const earliest = [];
     for (let i = sourceStart; i < expected.length; i++) {
         const item = expected[i], position = next(index[item.role]?.get(item.text) ?? [], after);
         if (position === undefined) return null;
         if (first === undefined) first = position;
-        after = position;
+        after = position; earliest.push(position);
     }
     const start = positions.at(-1), end = positions[0];
-    return first === start && after === end ? { start, end, sourceStart } : null;
+    if (first !== start || after !== end) return null;
+    if (uniqueSequence) {
+        const ordered = positions.slice().reverse();
+        if (earliest.some((position, i) => position !== ordered[i])) return null;
+        return { start, end, sourceStart, positions: ordered };
+    }
+    return { start, end, sourceStart };
 }
 
 function locateHistorySequence(chat, entries, requiredRoles) {
@@ -627,23 +743,63 @@ function reportHistorySkip(reason) {
     $('#cacheopt_last').text(lastRun);
 }
 
+function identityFinalHistory(chat, source) {
+    const candidates = source.identityGroups.map(group => ({ group, positions: new Map(), valid: true }));
+    const byGroup = new Map(candidates.map(candidate => [candidate.group, candidate]));
+    for (let position = 0; position < chat.length; position++) {
+        const message = chat[position], witness = source.identityWitnesses.get(message);
+        const candidate = witness && byGroup.get(witness.group);
+        if (!candidate) continue;
+        if (message.role !== witness.role || typeof message.content !== 'string' || !message.content.trim()
+            || candidate.positions.has(witness.index)) candidate.valid = false;
+        candidate.positions.set(witness.index, position);
+    }
+    const valid = candidates.filter(candidate => candidate.valid && candidate.positions.size === candidate.group.count)
+        .map(candidate => Array.from({ length: candidate.group.count }, (_, index) => candidate.positions.get(index)))
+        .filter(positions => positions.every((position, index) => position !== undefined && (index === 0 || position > positions[index - 1])));
+    if (valid.length !== 1) return null;
+    const positions = valid[0], entries = positions.map(position => ({ role: chat[position].role, content: chat[position].content }));
+    // New quoted messages are not given identity. They also cannot create a
+    // second text alignment that would enlarge the authenticated range later.
+    const aligned = alignHistorySequence(chat, entries, undefined, true);
+    if (!aligned || aligned.sourceStart !== 0 || aligned.positions.some((position, index) => position !== positions[index])) return null;
+    return { entries, start: positions[0], end: positions.at(-1) };
+}
+
 function confirmFinalHistory(chat) {
     const source = generationHistorySnapshot;
     processedHistorySnapshot = { chatId: ctx().getCurrentChatId(), entries: [], requiredRoles: [] };
     if (!source || source.blocked || source.chatId !== ctx().getCurrentChatId()
-        || chat.some(message => message?.role === 'tool' || message?.tool_calls || message?.tool_call_id)) return false;
+        || chat.some(message => message?.role === 'tool' || message?.tool_calls || message?.tool_call_id)) {
+        noteGenerationEvent('history-unconfirmed', { entries: source?.entries.length ?? 0, messages: chat.length });
+        return false;
+    }
+    if (source.identityGroups.length) {
+        const identity = identityFinalHistory(chat, source);
+        if (!identity) {
+            noteGenerationEvent('identity-final-unconfirmed', { entries: source.entries.length, messages: chat.length });
+            return false;
+        }
+        processedHistorySnapshot = { chatId: source.chatId, entries: identity.entries,
+            requiredRoles: [...new Set(identity.entries.map(item => item.role))] };
+        noteGenerationEvent('identity-final-confirmed', { entries: identity.entries.length, messages: chat.length,
+            start: identity.start, end: identity.end });
+        return true;
+    }
     // Only SETTINGS carries the generation type. Re-align the complete official
     // core here, so an earlier untyped helper's smaller budget cannot shorten the
     // main history boundary or turn older dynamic material into a fixed rule.
     const located = alignHistorySequence(chat, source.entries);
-    if (!located) return false;
+    if (!located) { noteGenerationEvent('history-unconfirmed', { entries: source.entries.length, messages: chat.length }); return false; }
     const entries = source.entries.slice(located.sourceStart);
     processedHistorySnapshot = { chatId: source.chatId, entries, requiredRoles: [...new Set(entries.map(item => item.role))] };
+    noteGenerationEvent('history-confirmed', { entries: entries.length, messages: chat.length, start: located.start, end: located.end });
     return true;
 }
 
 function onSettingsReady(data) {
     if (!isVertexConnection()) { clearGenerationScope(); return; }
+    noteGenerationEvent('settings', { suppliedType: diagnosticGenerationType(data?.type), vertex: data?.chat_completion_source === 'vertexai' });
     if (!settings().enabled || !Array.isArray(data?.messages)
         || data.chat_completion_source !== 'vertexai'
         || !['normal', 'regenerate', 'swipe'].includes(data.type)) return;
@@ -845,19 +1001,24 @@ function recordRealRequest(rawBody) {
     let body;
     try { body = JSON.parse(rawBody); } catch { return null; }
     if (!body || body.chat_completion_source !== 'vertexai' || !Array.isArray(body.messages)
-        || body.type === 'quiet' || !findHistoryRange(body.messages)) return null;
+        || !['normal', 'regenerate', 'swipe'].includes(body.type) || body[ACU_INTERNAL]) return null;
+    // Read-only API usage does not require permission to rewrite history. The
+    // fetch boundary separately rejects marked database helpers and other URLs.
+    const historyConfirmed = !!findHistoryRange(body.messages);
     const chatId = ctx().getCurrentChatId?.() ?? '';
     const now = Date.now();
     const channel = JSON.stringify([body.chat_completion_source, body.model, body.type, body.reverse_proxy, body.custom_url]);
     const history = ctx().chat ?? [];
-    const cur = { chatId, channel, at: now, body, texts: messageTexts(body), history: {
+    const cur = { chatId, channel, at: now, body, texts: messageTexts(body), historyConfirmed, history: historyConfirmed ? {
         count: history.length, userCount: history.filter(m => m.is_user).length,
         lastUser: history.findLast(m => m.is_user)?.mes ?? '',
-    } };
+    } : null };
     const candidates = recentReal.filter(r => r.chatId === chatId && r.channel === channel);
     if (candidates.length) {
         const previous = candidates.at(-1);
-        const report = describeReal(previous, cur, Math.round((now - previous.at) / 1000));
+        const report = previous.historyConfirmed && cur.historyConfirmed
+            ? describeReal(previous, cur, Math.round((now - previous.at) / 1000))
+            : `${new Date().toLocaleTimeString()}｜相邻 Vertex 请求的真实历史未确认，保守跳过前缀比较；仍观察本次 API 返回的缓存用量。`;
         settings().lastRealReport = report;
         save();
         $('#cacheopt_real').text(report);
@@ -865,6 +1026,7 @@ function recordRealRequest(rawBody) {
     }
     recentReal = [...recentReal.filter(r => r.chatId === chatId), cur].slice(-RECENT_LIMIT);
     latestRealAttempt = cur;
+    noteGenerationEvent('fetch-observed', { suppliedType: diagnosticGenerationType(body.type), historyConfirmed });
     $('#cacheopt_usage').text(`${body.model ?? '当前正文模型'}｜API 缓存统计：等待响应…`);
     return cur;
 }
@@ -1144,7 +1306,7 @@ function renderSettings() {
     <div class="cacheopt-settings">
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <b>⚡ Vertex 缓存优化 2.6.4</b>
+          <b>⚡ Vertex 缓存优化 2.6.5</b>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
@@ -1220,8 +1382,8 @@ jQuery(() => {
     const c = ctx();
     c.eventSource.on(c.eventTypes.WORLDINFO_ENTRIES_LOADED, onWorldInfoEntriesLoaded);
     if (c.eventTypes.GENERATION_STARTED) c.eventSource.on(c.eventTypes.GENERATION_STARTED, onGenerationStarted);
-    if (c.eventTypes.GENERATION_ENDED) c.eventSource.on(c.eventTypes.GENERATION_ENDED, clearGenerationScope);
-    if (c.eventTypes.GENERATION_STOPPED) c.eventSource.on(c.eventTypes.GENERATION_STOPPED, clearGenerationScope);
+    if (c.eventTypes.GENERATION_ENDED) c.eventSource.on(c.eventTypes.GENERATION_ENDED, onGenerationEnded);
+    if (c.eventTypes.GENERATION_STOPPED) c.eventSource.on(c.eventTypes.GENERATION_STOPPED, onGenerationStopped);
     c.eventSource.on(c.eventTypes.CHAT_COMPLETION_PROMPT_READY, onPromptReady);
     armFinalHook();
 });
