@@ -243,7 +243,7 @@ test('finished host history keeps exact chat provenance and declines unproven re
     assert.deepEqual(h.host.chat, raw);
 });
 
-test('processed history snapshots clear when chats change and never identify duplicate demonstrations', () => {
+test('processed history snapshots never replace an existing legacy range and clear when chats change', () => {
     let chatId = 'first-chat';
     const actual = '这一段曾经实际发生，但固定示范也完整重复了这一句话。';
     const latest = '这是唯一的当前用户输入，用于确定最后一个真实楼层。';
@@ -258,11 +258,54 @@ test('processed history snapshots clear when chats change and never identify dup
         { identifier: 'chatHistory-1', role: 'assistant', content: actual },
         { identifier: 'chatHistory-2', role: 'user', content: latest },
     ]), messages);
-    assert.deepEqual(plain(h.call('findHistoryRange', messages)), { start: 3, end: 3 });
+    assert.deepEqual(plain(h.call('findHistoryRange', messages)), { start: 0, end: 3 });
     chatId = 'second-chat';
     h.host.chat = [{ is_user: true, mes: '另一个聊天中的新输入。' }];
     assert.equal(h.call('findHistoryRange', messages), null);
     assert.equal(h.evaluate('processedHistorySnapshot'), null);
+});
+
+test('a current-user-only snapshot cannot hoist runtime systems across confirmed assistant history', () => {
+    const narrative = '站务员向旅客说明下一班车的发车时刻，并指着墙上的时刻表让他核对票面上的站台号码。'.repeat(6);
+    const user = '我核对票面上的号码后，继续询问月台在哪里。';
+    const runtime = '实际位置：这是运行时资料，应当照常随剧情变化，不能因为仅识别当前用户就被当成固定头。';
+    const h = harness({ chat: [
+        { is_user: false, mes: `<hidden-prefix>前缀已被提示词正则去除。</hidden-prefix>${narrative}` },
+        { is_user: true, mes: user },
+    ] });
+    const prepared = [
+        { role: 'system', content: rolePreset }, { role: 'assistant', content: fakeAssistant },
+        { role: 'system', content: '固定世界设定。' }, { role: 'assistant', content: narrative },
+        { role: 'system', content: runtime }, { role: 'user', content: user },
+    ];
+    h.setPromptManager(nativeHistoryManager([
+        { identifier: 'chatHistory-1', role: 'assistant', content: narrative },
+        { identifier: 'chatHistory-2', role: 'user', content: user },
+    ]));
+    h.call('settings').compatGeminiProxy = true;
+    const data = { chat: structuredClone(prepared), dryRun: false };
+    h.call('onPromptReady', data);
+    assert.equal(h.evaluate('processedHistorySnapshot.entries.length'), 1);
+    assert.deepEqual(plain(h.call('findHistoryRange', data.chat)), { start: 3, end: 4 });
+    assert.equal(data.chat.at(-1).content, runtime);
+    const body = { type: 'normal', chat_completion_source: 'vertexai', model: 'gemini-3.1-flash-lite', messages: data.chat };
+    assert.equal(h.call('applyGeminiProxyLayout', body).applied, true);
+    assert.ok(!body.messages[0].content.includes(runtime));
+    assert.equal(body.messages.at(-1).role, 'user');
+    assert.equal(body.messages.at(-1).content, runtime);
+});
+
+test('snapshot fallback requires unique complete assistant and user matches when raw history is unavailable', () => {
+    const assistant = '这是当时的实际助手回答，用于建立完整来源的快照。';
+    const user = '这是当时的实际用户输入，用于建立完整来源的快照。';
+    const h = harness({ chat: [{ is_user: false, mes: assistant }, { is_user: true, mes: user }] });
+    const messages = [{ role: 'assistant', content: assistant }, { role: 'user', content: user }];
+    h.call('captureProcessedHistory', nativeHistoryManager(messages.map((m, i) => ({ ...m, identifier: `chatHistory-${i}` }))), messages);
+    h.host.chat = [{ is_user: true, mes: '宿主随后变更的文本不能与旧快照匹配。' }];
+    assert.equal(h.call('findRawHistoryRange', messages), null);
+    assert.deepEqual(plain(h.call('findHistoryRange', messages)), { start: 0, end: 1 });
+    assert.equal(h.call('findHistoryRange', [{ role: 'user', content: user }]), null);
+    assert.equal(h.call('findHistoryRange', [...messages, { role: 'assistant', content: assistant }]), null);
 });
 
 test('a depth injection quoting one span cannot become a processed history witness', () => {
@@ -521,6 +564,60 @@ test('native Gemini signed history stays separate and is preserved once after fi
     assert.equal(body.messages.filter(m => m.content === history).length, 1);
     assert.equal(body.messages.filter(m => m.signature).length, 1);
     assert.equal(body.messages[0].content, `首条系统规则。\n\n${rolePreset}`);
+});
+
+const runtimeIntervention = (turn, floor) => `【本轮江湖介入】启用后第${turn}轮；实际玩家回合序号${turn}，玩家楼层${floor}。当前介入记录应照常更新。同轮续写不新开第二个事件。`;
+const runtimeFortune = value => `<此刻运势>${value}</此刻运势>\n同一回合各项不同行动共用此值。只在叙事检定中使用，不在正文展示运势。`;
+
+test('complete card runtime counters and fortune stay live at their user positions outside the fixed head', () => {
+    const user = '我继续向前行进，查看站牌上的最新消息。';
+    const h = harness({ chat: [{ is_user: true, mes: user }] });
+    h.call('settings').compatGeminiProxy = true;
+    const heads = [];
+    for (let turn = 1; turn <= 2; turn++) {
+        const intervention = runtimeIntervention(turn, turn + 10), fortune = runtimeFortune(turn + 20);
+        const body = { type: 'normal', chat_completion_source: 'vertexai', model: 'gemini-3.1-flash-lite', messages: [
+            { role: 'system', content: rolePreset }, { role: 'system', content: intervention },
+            { role: 'system', content: '固定规则只提及本轮、运势与随机，不包含运行时记录。' },
+            { role: 'system', content: fortune }, { role: 'user', content: user },
+        ] };
+        const report = h.call('applyGeminiProxyLayout', body);
+        assert.equal(report.applied, true);
+        assert.equal(report.convertedSystems, 2);
+        assert.equal(report.mergedSystems, 2);
+        assert.ok(!body.messages[0].content.includes('启用后第'));
+        assert.ok(!body.messages[0].content.includes('<此刻运势>'));
+        assert.ok(body.messages[0].content.includes('固定规则只提及本轮、运势与随机'));
+        assert.deepEqual(plain(body.messages.filter(m => [intervention, fortune].includes(m.content)).map(m => m.role)), ['user', 'user']);
+        assert.ok(body.messages.findIndex(m => m.content === intervention) < body.messages.findIndex(m => m.content === fortune));
+        for (const content of [intervention, fortune, user]) assert.equal(body.messages.map(m => m.content).join('').split(content).length - 1, 1);
+        heads.push(body.messages[0].content);
+    }
+    assert.equal(heads[0], heads[1]);
+});
+
+test('complete runtime records embedded in a merged system are separated without freezing or deleting their text', () => {
+    const user = '我查看前方的路口，准备继续赶往渡口。';
+    const h = harness({ chat: [{ is_user: true, mes: user }] });
+    h.call('settings').compatGeminiProxy = true;
+    const heads = [];
+    for (let turn = 1; turn <= 2; turn++) {
+        const intervention = runtimeIntervention(turn, turn + 30), fortune = runtimeFortune(turn + 40);
+        const content = `${rolePreset}\n\n${intervention}\n\n固定世界规则继续保持。\n\n${fortune}\n\n固定输出格式。`;
+        const parts = h.call('splitRuntimeSystemRecords', [{ role: 'system', content }]);
+        assert.equal(parts.converted, 2);
+        assert.equal(parts.messages.map(m => m.content).join(''), content, 'splitting retains every original character');
+        const body = { type: 'normal', chat_completion_source: 'custom', model: 'gemini-proxy', messages: [
+            { role: 'system', content }, { role: 'user', content: user },
+        ] };
+        assert.equal(h.call('applyGeminiProxyLayout', body).applied, true);
+        assert.ok(body.messages.some(m => m.role === 'user' && m.content === intervention));
+        assert.ok(body.messages.some(m => m.role === 'user' && m.content === fortune));
+        assert.ok(body.messages[0].content.includes(rolePreset));
+        assert.ok(body.messages[0].content.includes('固定输出格式。'));
+        heads.push(body.messages[0].content);
+    }
+    assert.equal(heads[0], heads[1]);
 });
 
 test('usage inspection exposes only recognized finite cache numbers and their field paths', () => {

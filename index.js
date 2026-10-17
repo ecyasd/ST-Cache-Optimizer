@@ -335,16 +335,7 @@ function matchesHistoryText(message, item) {
  * 找出提示词里真正的聊天记录范围。很多预设在聊天记录前放伪造的 user/assistant 对话、规则和资料，
  * 不能把「第一条非 system 消息」当成聊天记录的开头，所以拿真实聊天消息逐条比对。
  */
-function findHistoryRange(chat) {
-    const snapshot = currentProcessedHistory();
-    if (snapshot) {
-        const positions = snapshot.entries.flatMap(item => {
-            const matching = chat.map((message, i) => matchesHistoryText(message, item) ? i : -1).filter(i => i >= 0);
-            // Identical preset demonstrations cannot expand the actual history boundary.
-            return matching.length === 1 ? matching : [];
-        });
-        return positions.length ? { start: Math.min(...positions), end: Math.max(...positions) } : null;
-    }
+function findRawHistoryRange(chat) {
     const snippets = historySnippets();
     if (!snippets.length) return null;
     let start = -1, end = -1;
@@ -359,6 +350,22 @@ function findHistoryRange(chat) {
         }
     });
     return start < 0 ? null : { start, end };
+}
+
+function findHistoryRange(chat) {
+    const snapshot = currentProcessedHistory();
+    // Do not let an exact-only snapshot of the latest user shrink an already
+    // confirmed real assistant boundary and promote intervening runtime systems.
+    const legacy = findRawHistoryRange(chat);
+    if (legacy) return legacy;
+    if (!snapshot) return null;
+    const matches = snapshot.entries.flatMap(item => {
+        const matching = chat.map((message, i) => matchesHistoryText(message, item) ? i : -1).filter(i => i >= 0);
+        return matching.length === 1 ? [{ at: matching[0], role: item.role }] : [];
+    });
+    if (!['assistant', 'user'].every(role => matches.some(item => item.role === role))) return null;
+    const positions = matches.map(item => item.at);
+    return { start: Math.min(...positions), end: Math.max(...positions) };
 }
 
 function reorder(chat) {
@@ -518,6 +525,30 @@ const ACU_INTERNAL = Symbol.for('acu.internal-generation-fetch');
 // 仅在同聊天、同来源/模型/请求类型内，对比紧邻上次请求，避免重复请求美化连续楼层结果。
 let recentReal = [];
 
+/** Complete runtime records produced by this card's scripts, after template rendering.
+ * Rules merely mentioning fortune or a current turn are not runtime provenance.
+ */
+function splitRuntimeSystemRecords(messages) {
+    const runtime = /^【本轮江湖介入】启用后第\d+轮；实际玩家回合序号\d+，玩家楼层\d+。[^\n]*同轮续写不新开第二个事件。(?=\n|$)|^<此刻运势>[^\S\n]*\d{1,3}[^\S\n]*<\/此刻运势>[^\S\n]*\n同一回合各项不同行动共用此值。[^\n]*不在正文展示运势。(?=\n|$)/gm;
+    let converted = 0;
+    const result = messages.flatMap(message => {
+        if (message.role !== 'system') return [message];
+        const matches = [...message.content.matchAll(runtime)];
+        if (!matches.length) return [message];
+        const pieces = [];
+        let at = 0;
+        for (const match of matches) {
+            if (match.index > at) pieces.push({ ...message, content: message.content.slice(at, match.index) });
+            pieces.push({ role: 'user', content: match[0] });
+            converted++;
+            at = match.index + match[0].length;
+        }
+        if (at < message.content.length) pieces.push({ ...message, content: message.content.slice(at) });
+        return pieces;
+    });
+    return { messages: result, converted };
+}
+
 /** Opt-in transport compatibility, after auxiliary attribution is available.
  * Text order inside each original message is unchanged; system priority/order does change.
  * This is not an explicit provider cache and does not imply a token hit rate.
@@ -536,12 +567,14 @@ function applyGeminiProxyLayout(body) {
         || Object.keys(message).some(key => !['role', 'content'].includes(key)
             && !(key === 'signature' && ['user', 'assistant'].includes(message.role) && typeof message.signature === 'string')))) return skip('message-metadata');
     if (body.messages.some(message => /\bIZ[MW]7_/i.test(message.content))) return skip('memory-authorization');
-    const range = findHistoryRange(body.messages);
+    const runtime = splitRuntimeSystemRecords(body.messages);
+    const messages = runtime.messages;
+    const range = findHistoryRange(messages);
     if (!range) return skip('unconfirmed-history');
     const fixed = [], remaining = [];
-    let convertedSystems = 0, fixedPlaceholders = 0;
-    for (let i = 0; i < body.messages.length; i++) {
-        const message = body.messages[i];
+    let convertedSystems = runtime.converted, fixedPlaceholders = 0;
+    for (let i = 0; i < messages.length; i++) {
+        const message = messages[i];
         if (message.role !== 'system') { remaining.push(message); continue; }
         if (i < range.start) {
             const t = message.content.trimStart();
