@@ -10,7 +10,7 @@ const messages = () => [{ role: 'system', content: '固定规则。' }, { role: 
     { role: 'system', content: '这一轮变化的资料。' }, { role: 'user', content: core[1].mes }];
 function harness() {
     const host = { mainApi: 'openai', chatCompletionSettings: { chat_completion_source: 'vertexai' },
-        extensionSettings: {}, chat: structuredClone(core), getCurrentChatId: () => 'offline-lifecycle',
+        extensionSettings: { cacheOptimizer: { preserveStructure: false } }, chat: structuredClone(core), getCurrentChatId: () => 'offline-lifecycle',
         saveSettingsDebounced() {}, eventTypes: {}, eventSource: { on() {}, removeListener() {}, makeLast() {} } };
     const panels = new Map();
     const chain = new Proxy({}, { get: () => () => chain });

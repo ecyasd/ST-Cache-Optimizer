@@ -1,0 +1,418 @@
+{
+  "formatVersion": 1,
+  "testVersion": "2.6.6",
+  "kind": "isolated-browser-continuing-chat-validation",
+  "extensionSourceSHA256": "0f05ae4cb8755f78140f95d63139ae13f9369b7b97124b35781fa25221ca8dd6",
+  "evidence": {
+    "savedChat": {
+      "totalFloors": 13,
+      "userFloors": 6,
+      "assistantFloorsIncludingOpening": 7,
+      "strictUserAssistantAlternationAfterOpening": true,
+      "sixOriginalArticleTextsAppearOnceInTheirAssistantFloors": true
+    },
+    "heldConfiguration": {
+      "preserveStructure": true,
+      "fixedHeadExperiment": false,
+      "codeSettingsAndPresetHeldConstantAcrossSixRounds": true,
+      "regenerateOrSwipeUsed": false
+    },
+    "browserFinalRequests": {
+      "actualBrowserGenerated": true,
+      "capturedBeforeBackendModelCall": true,
+      "typedNormalMainRequests": 6,
+      "immediatelyPreviousMainOnly": true,
+      "commonPrefixComputedFromCompleteCapturedMessages": true
+    },
+    "mainProvider": {
+      "called": false,
+      "externalRequests": 0,
+      "responseReplacement": "six distinct public-domain article excerpts",
+      "fabricatedUsage": false,
+      "apiCacheUsage": "unknown"
+    },
+    "auxiliaryAPI": {
+      "actualConfiguredAPICalls": true,
+      "http200Count": 6,
+      "keptSeparateFromMainComparisons": true,
+      "fees": "unknown"
+    },
+    "converterSimulation": {
+      "actualLocalHostConverterSource": true,
+      "execution": "VM with explicit default config fixture",
+      "sourceSHA256": "23c241d3642cee88a7b5964ea583cbcbf0c3c28543dab86ddfc25ec501111694",
+      "configFixture": {
+        "promptPlaceholder": "Let's get started.",
+        "gemini.thoughtSignatures": true
+      },
+      "providerTransportEnvelopeExecuted": false,
+      "backendPostProcessPromptExecuted": false,
+      "fullBackendRequestReproduced": false,
+      "capturedPostProcessingModes": [
+        {
+          "round": 1,
+          "customPromptPostProcessing": "merge_tools"
+        },
+        {
+          "round": 2,
+          "customPromptPostProcessing": "merge_tools"
+        },
+        {
+          "round": 3,
+          "customPromptPostProcessing": "merge_tools"
+        },
+        {
+          "round": 4,
+          "customPromptPostProcessing": "merge_tools"
+        },
+        {
+          "round": 5,
+          "customPromptPostProcessing": "merge_tools"
+        },
+        {
+          "round": 6,
+          "customPromptPostProcessing": "merge_tools"
+        }
+      ],
+      "boundary": "Only direct convertGooglePrompt was executed. Backend pre-conversion postProcessPrompt and transport envelope were not executed, including any behavior selected by custom_prompt_post_processing.",
+      "preconversionModeObservedInAllSixRequests": "merge_tools"
+    }
+  },
+  "checks": {
+    "distinctInputs": 6,
+    "inputHashes": [
+      {
+        "round": 1,
+        "SHA256": "5283726ba746fd326f81e7bacec1412603e3ca4c00b960ff2bdcd496529b2c3a",
+        "confirmedInCapturedUserMessage": true
+      },
+      {
+        "round": 2,
+        "SHA256": "e9670302256d96ff666d19c28439559a50f9679c6cbe05d3d00b9a9159318c39",
+        "confirmedInCapturedUserMessage": true
+      },
+      {
+        "round": 3,
+        "SHA256": "7dfe8c4eb1ff7caa6597ba1d39ecc816a47639923e4fc042b2859bc203153cb8",
+        "confirmedInCapturedUserMessage": true
+      },
+      {
+        "round": 4,
+        "SHA256": "89524405392b05749dc84282cdeb9e292c60ba475d7ddf0a24f7c682ca295058",
+        "confirmedInCapturedUserMessage": true
+      },
+      {
+        "round": 5,
+        "SHA256": "aa1e3742d0678500ff9390a8599f485b959bbb890675e277d2b8210ff6a3e3af",
+        "confirmedInCapturedUserMessage": true
+      },
+      {
+        "round": 6,
+        "SHA256": "321683a54797612bfc65e8f3a90f08cd3d144d8dc95eec884019827d8169df14",
+        "confirmedInCapturedUserMessage": true
+      }
+    ],
+    "distinctOriginalArticles": 6,
+    "articleOriginalHashes": [
+      {
+        "round": 1,
+        "SHA256": "5198efeb2f232426eebb534c3c9edfdc2dd8f6c34afe7e8ea331724217758527"
+      },
+      {
+        "round": 2,
+        "SHA256": "23827f7318c1db5327f17d4ceeb0b32c74b3ca006555257b937608f15dfcf5d7"
+      },
+      {
+        "round": 3,
+        "SHA256": "c075d8250d8e4ed3bfc7e050692dc62a004f15d7d1685e6500e9493f3780de17"
+      },
+      {
+        "round": 4,
+        "SHA256": "55533b5e3bc805eb931d36e70d0e77d81b669b45ca50ca8ac2fac76d69afbbe1"
+      },
+      {
+        "round": 5,
+        "SHA256": "1c2ab26a0b02a5814b30fa58f4bf9f23e722df2443e94db15edc3a675190dc1d"
+      },
+      {
+        "round": 6,
+        "SHA256": "2dd6483c9415c6ff29fc518562e6597b598ebfb4ee701703ebb90bf06862e449"
+      }
+    ],
+    "originalArticleHashVerifiedAgainstSavedCorpus": true,
+    "articleDifferencesExistBeforeAddingRoundMarkers": true,
+    "immediatePreviousAssistantArticlePreservedExactlyOnce": true,
+    "wrongUserRoleCopiesOfPreviousAssistantArticle": 0,
+    "allEarlierAssistantArticlesRetained": false,
+    "earlierHistoryLimit": "Existing preset regexes were replayed offline: depth >= 5 user/assistant messages and depth >= 2 user messages are cleared, reproducing the observed recent-history window. Saved chat retains all 13 floors.",
+    "missingOlderAssistantRounds": [
+      {
+        "currentRound": 4,
+        "previousRound": 1
+      },
+      {
+        "currentRound": 5,
+        "previousRound": 1
+      },
+      {
+        "currentRound": 5,
+        "previousRound": 2
+      },
+      {
+        "currentRound": 6,
+        "previousRound": 1
+      },
+      {
+        "currentRound": 6,
+        "previousRound": 2
+      },
+      {
+        "currentRound": 6,
+        "previousRound": 3
+      }
+    ]
+  },
+  "stableSystemHead": {
+    "allSixIdentical": true,
+    "textChars": 277,
+    "canonicalMessageSHA256": "8c01cc96f0c319099fc55415bad28bf695146076cab02a7a9ead84037bf83f01",
+    "textSHA256": "b7d186f2e588b7d9dd64a046ca34a612f80b44e26e6ad65dabdb30b7db93a4f4",
+    "measurementSource": "converterSimulation",
+    "scope": "Only the 277-character head of converterSimulation is identical; this is not the complete-prompt prefix percentage."
+  },
+  "prefixMetric": {
+    "serialization": "Canonical complete message JSON joined by newline; native sequence prepends system_instruction as one system message",
+    "unit": "UTF-16 code units",
+    "isCacheTokenHitRate": false,
+    "primaryMetric": "promptText",
+    "promptTextSerialization": "[role]content for each message, joined by one newline with no trailing newline",
+    "pluginPanelSerialization": "JSON.stringify(message) in original key order, with one newline counted per message including the last",
+    "formula": "100 * consecutive identical characters from the start / complete current message-sequence characters",
+    "laterEqualCharactersAfterFirstDifferenceCounted": false,
+    "requestParametersAndHTTPEnvelopeIncluded": false
+  },
+  "comparisons": [
+    {
+      "previousRound": 1,
+      "currentRound": 2,
+      "capturedFrontend": {
+        "identicalPrefixMessages": 22,
+        "commonPrefixChars": 30331,
+        "firstDifferencePath": "/22/content",
+        "previousChars": 68777,
+        "currentChars": 67359,
+        "commonPrefixPercent": 45.028875,
+        "firstDifferenceMessageOrdinal": 23,
+        "firstDifferenceMessageRole": "assistant"
+      },
+      "systemHeadUnchanged": true,
+      "immediatePreviousAssistantArticleExactlyOnce": true,
+      "converterSimulation": {
+        "identicalPrefixMessages": 5,
+        "commonPrefixChars": 29907,
+        "firstDifferencePath": "/5/parts/0/text"
+      },
+      "promptText": {
+        "commonPrefixChars": 29008,
+        "previousChars": 66713,
+        "currentChars": 65300,
+        "commonPrefixPercent": 44.422665
+      },
+      "pluginPanel": {
+        "commonPrefixChars": 30328,
+        "previousChars": 68778,
+        "currentChars": 67360,
+        "commonPrefixPercent": 45.023753
+      }
+    },
+    {
+      "previousRound": 2,
+      "currentRound": 3,
+      "capturedFrontend": {
+        "identicalPrefixMessages": 21,
+        "commonPrefixChars": 30270,
+        "firstDifferencePath": "/21/content",
+        "previousChars": 67359,
+        "currentChars": 67417,
+        "commonPrefixPercent": 44.899654,
+        "firstDifferenceMessageOrdinal": 22,
+        "firstDifferenceMessageRole": "assistant"
+      },
+      "systemHeadUnchanged": true,
+      "immediatePreviousAssistantArticleExactlyOnce": true,
+      "converterSimulation": {
+        "identicalPrefixMessages": 5,
+        "commonPrefixChars": 29880,
+        "firstDifferencePath": "/5/parts/0/text"
+      },
+      "promptText": {
+        "commonPrefixChars": 28982,
+        "previousChars": 65300,
+        "currentChars": 65359,
+        "commonPrefixPercent": 44.342784
+      },
+      "pluginPanel": {
+        "commonPrefixChars": 30289,
+        "previousChars": 67360,
+        "currentChars": 67418,
+        "commonPrefixPercent": 44.927171
+      }
+    },
+    {
+      "previousRound": 3,
+      "currentRound": 4,
+      "capturedFrontend": {
+        "identicalPrefixMessages": 21,
+        "commonPrefixChars": 30270,
+        "firstDifferencePath": "/21/content",
+        "previousChars": 67417,
+        "currentChars": 68391,
+        "commonPrefixPercent": 44.26021,
+        "firstDifferenceMessageOrdinal": 22,
+        "firstDifferenceMessageRole": "assistant"
+      },
+      "systemHeadUnchanged": true,
+      "immediatePreviousAssistantArticleExactlyOnce": true,
+      "converterSimulation": {
+        "identicalPrefixMessages": 5,
+        "commonPrefixChars": 29880,
+        "firstDifferencePath": "/5/parts/0/text"
+      },
+      "promptText": {
+        "commonPrefixChars": 28982,
+        "previousChars": 65359,
+        "currentChars": 66324,
+        "commonPrefixPercent": 43.697606
+      },
+      "pluginPanel": {
+        "commonPrefixChars": 30289,
+        "previousChars": 67418,
+        "currentChars": 68392,
+        "commonPrefixPercent": 44.287344
+      }
+    },
+    {
+      "previousRound": 4,
+      "currentRound": 5,
+      "capturedFrontend": {
+        "identicalPrefixMessages": 21,
+        "commonPrefixChars": 30270,
+        "firstDifferencePath": "/21/content",
+        "previousChars": 68391,
+        "currentChars": 67506,
+        "commonPrefixPercent": 44.840459,
+        "firstDifferenceMessageOrdinal": 22,
+        "firstDifferenceMessageRole": "assistant"
+      },
+      "systemHeadUnchanged": true,
+      "immediatePreviousAssistantArticleExactlyOnce": true,
+      "converterSimulation": {
+        "identicalPrefixMessages": 5,
+        "commonPrefixChars": 29880,
+        "firstDifferencePath": "/5/parts/0/text"
+      },
+      "promptText": {
+        "commonPrefixChars": 28982,
+        "previousChars": 66324,
+        "currentChars": 65448,
+        "commonPrefixPercent": 44.282484
+      },
+      "pluginPanel": {
+        "commonPrefixChars": 30289,
+        "previousChars": 68392,
+        "currentChars": 67507,
+        "commonPrefixPercent": 44.86794
+      }
+    },
+    {
+      "previousRound": 5,
+      "currentRound": 6,
+      "capturedFrontend": {
+        "identicalPrefixMessages": 21,
+        "commonPrefixChars": 30270,
+        "firstDifferencePath": "/21/content",
+        "previousChars": 67506,
+        "currentChars": 67500,
+        "commonPrefixPercent": 44.844444,
+        "firstDifferenceMessageOrdinal": 22,
+        "firstDifferenceMessageRole": "assistant"
+      },
+      "systemHeadUnchanged": true,
+      "immediatePreviousAssistantArticleExactlyOnce": true,
+      "converterSimulation": {
+        "identicalPrefixMessages": 5,
+        "commonPrefixChars": 29880,
+        "firstDifferencePath": "/5/parts/0/text"
+      },
+      "promptText": {
+        "commonPrefixChars": 28982,
+        "previousChars": 65448,
+        "currentChars": 65442,
+        "commonPrefixPercent": 44.286544
+      },
+      "pluginPanel": {
+        "commonPrefixChars": 30289,
+        "previousChars": 67507,
+        "currentChars": 67501,
+        "commonPrefixPercent": 44.871928
+      }
+    }
+  ],
+  "limitations": [
+    "This run has no disabled-optimizer live control group, so it does not quantify the optimization gain.",
+    "The stable head and common prefix do not establish provider cache hits.",
+    "Host-converter VM output was not sent to the main provider.",
+    "Frontend prefix and assistant-role checks use actual browser final request captures and do not depend on converterSimulation.",
+    "The measured prompt-text consecutive prefix is 44.20%; no passing threshold or disabled live control was established, so this run does not establish that optimization is effective or complete."
+  ],
+  "privateTextIncluded": false,
+  "prefixSummary": {
+    "promptText": {
+      "comparisons": 5,
+      "commonPrefixChars": 144936,
+      "currentChars": 327873,
+      "weightedCommonPrefixPercent": 44.204921,
+      "arithmeticMeanCommonPrefixPercent": 44.206417,
+      "minimumCommonPrefixPercent": 43.697606,
+      "maximumCommonPrefixPercent": 44.422665
+    },
+    "capturedFrontendCanonicalJSON": {
+      "comparisons": 5,
+      "commonPrefixChars": 151411,
+      "currentChars": 338173,
+      "weightedCommonPrefixPercent": 44.773237,
+      "arithmeticMeanCommonPrefixPercent": 44.774728,
+      "minimumCommonPrefixPercent": 44.26021,
+      "maximumCommonPrefixPercent": 45.028875
+    },
+    "pluginPanel": {
+      "comparisons": 5,
+      "commonPrefixChars": 151484,
+      "currentChars": 338178,
+      "weightedCommonPrefixPercent": 44.794162,
+      "arithmeticMeanCommonPrefixPercent": 44.795627,
+      "minimumCommonPrefixPercent": 44.287344,
+      "maximumCommonPrefixPercent": 45.023753
+    }
+  },
+  "prefixDiagnosis": {
+    "firstDifferenceCategory": "genuine assistant history, not injected runtime fields",
+    "existingPresetRegexWindowReproducedOffline": true,
+    "finalMessageReorderedBlockCounts": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "unchangedCharactersAfterFirstDifference": 18473,
+    "unchangedCharactersAfterFirstDifferenceByRole": {
+      "system": 17646,
+      "user": 293,
+      "assistant": 534
+    },
+    "fixedWorldInfoCharactersAtOriginalDepthOne": 14009,
+    "structurePreservationConsequence": "Moving these fixed worldbook entries ahead of history would change their author-selected depth and prompt position."
+  }
+}

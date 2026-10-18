@@ -1,0 +1,1108 @@
+{
+  "formatVersion": 1,
+  "testVersion": "2.6.7",
+  "kind": "two-actual-browser-groups-enabled-2.6.6-versus-enabled-2.6.7",
+  "completed": true,
+  "primaryResult": {
+    "metric": "Whole-current-prompt longest equal character prefix, [role]content serialization",
+    "baselineWeightedPercent": 44.204920807751776,
+    "candidateWeightedPercent": 65.57767490653151,
+    "improvementPercentagePoints": 21.372754098779737,
+    "baselineArithmeticMeanPercent": 44.20641632682294,
+    "candidateArithmeticMeanPercent": 65.57987689988727,
+    "notSystemHeadOnly": true,
+    "notProviderCacheTokenHitRate": true
+  },
+  "evidenceBoundary": {
+    "browser": "Both groups are six normal continuing chats captured at the actual browser final-request boundary; no rerolls.",
+    "mainProvider": "Never called. Six distinct original public-domain article excerpts were returned locally and saved as assistant floors in each group.",
+    "auxiliary": "Configured database auxiliary API used normally: six formal HTTP 200 model calls in each group; fees unknown.",
+    "converterSimulation": "Optional converter artifacts are direct convertGooglePrompt VM output only, without backend postProcessPrompt or provider transport. None of the primary ratios use those simulations."
+  },
+  "initialConditions": {
+    "sameOriginalSanitizedDataSnapshotSHA256": "61fbb5e5c6e51b8858f989b2dbd76d57add566a004fe0166e1b7ff7909a03110",
+    "commonSeedArtifactSHA256": "08c1d439b0e9bef49ebead59be4a2b2553b99c4353b1521e27db74de3bbe7ddd",
+    "commonAssistantOpeningSHA256": "f30950fcabce51d2d6fe3602d0ea27f851a30ee15e3f5645903ec3cd0ea9bdbf",
+    "commonSeedMetadataExactLineSHA256": "5e0bde9990417e8e29a837cdf3f7c124b7c43b3ef73bab3c06fb7e3eb01afb23",
+    "seedFreezeRecordedAtUTC": "2026-10-18T21:27:11.717Z",
+    "baselineMainRequestsAtSeedFreeze": 0,
+    "candidateMainRequestsAtSeedFreeze": 0,
+    "candidateSeedCopyHashRecordedByRootMatchesCommon": true,
+    "rootConfirmedStartingUserFloors": 0,
+    "rootConfirmedStartingAssistantFloors": 1,
+    "postImportPreGenerationDatabaseSemanticEquality": "unknown; no immutable timestamped semantic snapshot of UI-initialized database state was retained",
+    "hostMayRewriteImportMetadata": true,
+    "sameInputsAndSameArticleSequence": true
+  },
+  "metricDefinitions": {
+    "unit": "UTF-16 code units",
+    "roleContent": "Each complete message is [role]content; join with one newline, no final newline.",
+    "canonicalJSON": "Each complete message uses canonical JSON with sorted object keys; join with newline, no final newline.",
+    "panelJSON": "Each complete message uses original-key-order JSON.stringify, plus one newline per message, including the last.",
+    "pairFormula": "100 * LCP(serialized previous messages, serialized current messages).length / serialized current messages.length",
+    "weightedFormula": "100 * sum(pair common prefix characters) / sum(pair current full prompt characters)",
+    "arithmeticMeanFormula": "Arithmetic mean of the five adjacent-pair percentages in each six-round group",
+    "scope": "Full body.messages, including roles and all content; excludes HTTP envelope and generation parameters."
+  },
+  "baseline": {
+    "version": "2.6.6",
+    "sourceArtifacts": [
+      {
+        "file": "index.js",
+        "SHA256": "0f05ae4cb8755f78140f95d63139ae13f9369b7b97124b35781fa25221ca8dd6",
+        "matchesSealedArtifact": true
+      },
+      {
+        "file": "manifest.json",
+        "SHA256": "86a88a729668186be1bb63f41f5b1b683bc2872c1dad7e5ef70c265f02b35220",
+        "matchesSealedArtifact": true
+      },
+      {
+        "file": "style.css",
+        "SHA256": "d05edd31764ca18ce0f1f04699535c9c76a4dfa6a2875c562efc9e41cf93317c",
+        "matchesSealedArtifact": true
+      }
+    ],
+    "browserLoadedSourceHashNotCapturedDirectly": true,
+    "counts": {
+      "typedNormalMainRequests": 6,
+      "realAuxiliaryAttempts": 6,
+      "realAuxiliaryHTTP200": 6,
+      "savedUserFloors": 6,
+      "savedAssistantFloors": 7,
+      "totalSavedFloors": 13,
+      "distinctInputs": 6,
+      "distinctOriginalArticles": 6
+    },
+    "checks": {
+      "strictSavedRoleAlternation": true,
+      "allSixInputsStoredInUserRole": true,
+      "storedUserMessagesAreDistinct": true,
+      "allSixOriginalArticlesStoredAsAssistantExactlyOnce": true,
+      "articlesIncorrectlyStoredAsUser": 0,
+      "immediatePreviousAssistantArticleInNextRequestExactlyOnce": true,
+      "allEarlierAssistantArticlesRetainedInEveryPrompt": false
+    },
+    "originalInputHashes": [
+      {
+        "round": 1,
+        "SHA256": "5283726ba746fd326f81e7bacec1412603e3ca4c00b960ff2bdcd496529b2c3a"
+      },
+      {
+        "round": 2,
+        "SHA256": "e9670302256d96ff666d19c28439559a50f9679c6cbe05d3d00b9a9159318c39"
+      },
+      {
+        "round": 3,
+        "SHA256": "7dfe8c4eb1ff7caa6597ba1d39ecc816a47639923e4fc042b2859bc203153cb8"
+      },
+      {
+        "round": 4,
+        "SHA256": "89524405392b05749dc84282cdeb9e292c60ba475d7ddf0a24f7c682ca295058"
+      },
+      {
+        "round": 5,
+        "SHA256": "aa1e3742d0678500ff9390a8599f485b959bbb890675e277d2b8210ff6a3e3af"
+      },
+      {
+        "round": 6,
+        "SHA256": "321683a54797612bfc65e8f3a90f08cd3d144d8dc95eec884019827d8169df14"
+      }
+    ],
+    "originalArticleHashes": [
+      {
+        "round": 1,
+        "SHA256": "5198efeb2f232426eebb534c3c9edfdc2dd8f6c34afe7e8ea331724217758527",
+        "verifiedBeforeRoundMarker": true
+      },
+      {
+        "round": 2,
+        "SHA256": "23827f7318c1db5327f17d4ceeb0b32c74b3ca006555257b937608f15dfcf5d7",
+        "verifiedBeforeRoundMarker": true
+      },
+      {
+        "round": 3,
+        "SHA256": "c075d8250d8e4ed3bfc7e050692dc62a004f15d7d1685e6500e9493f3780de17",
+        "verifiedBeforeRoundMarker": true
+      },
+      {
+        "round": 4,
+        "SHA256": "55533b5e3bc805eb931d36e70d0e77d81b669b45ca50ca8ac2fac76d69afbbe1",
+        "verifiedBeforeRoundMarker": true
+      },
+      {
+        "round": 5,
+        "SHA256": "1c2ab26a0b02a5814b30fa58f4bf9f23e722df2443e94db15edc3a675190dc1d",
+        "verifiedBeforeRoundMarker": true
+      },
+      {
+        "round": 6,
+        "SHA256": "2dd6483c9415c6ff29fc518562e6597b598ebfb4ee701703ebb90bf06862e449",
+        "verifiedBeforeRoundMarker": true
+      }
+    ],
+    "primaryActualBrowserRequestEvidence": {
+      "comparisons": [
+        {
+          "previousRound": 1,
+          "currentRound": 2,
+          "fullyIdenticalPrefixMessages": 22,
+          "firstDifference": {
+            "path": "/22/content",
+            "commonValueChars": 0,
+            "previousChars": 16241,
+            "currentChars": 92
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 29008,
+              "currentFullPromptChars": 65300,
+              "percent": 44.422664624808576
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 30331,
+              "currentFullPromptChars": 67359,
+              "percent": 45.028875131756706
+            },
+            "panelJSON": {
+              "commonPrefixChars": 30328,
+              "currentFullPromptChars": 67360,
+              "percent": 45.02375296912114
+            }
+          }
+        },
+        {
+          "previousRound": 2,
+          "currentRound": 3,
+          "fullyIdenticalPrefixMessages": 21,
+          "firstDifference": {
+            "path": "/21/content",
+            "commonValueChars": 0,
+            "previousChars": 24,
+            "currentChars": 92
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 28982,
+              "currentFullPromptChars": 65359,
+              "percent": 44.34278370232103
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 30270,
+              "currentFullPromptChars": 67417,
+              "percent": 44.899654389842325
+            },
+            "panelJSON": {
+              "commonPrefixChars": 30289,
+              "currentFullPromptChars": 67418,
+              "percent": 44.92717078525023
+            }
+          }
+        },
+        {
+          "previousRound": 3,
+          "currentRound": 4,
+          "fullyIdenticalPrefixMessages": 21,
+          "firstDifference": {
+            "path": "/21/content",
+            "commonValueChars": 0,
+            "previousChars": 92,
+            "currentChars": 87
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 28982,
+              "currentFullPromptChars": 66324,
+              "percent": 43.69760569326338
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 30270,
+              "currentFullPromptChars": 68391,
+              "percent": 44.260209676711845
+            },
+            "panelJSON": {
+              "commonPrefixChars": 30289,
+              "currentFullPromptChars": 68392,
+              "percent": 44.287343548953096
+            }
+          }
+        },
+        {
+          "previousRound": 4,
+          "currentRound": 5,
+          "fullyIdenticalPrefixMessages": 21,
+          "firstDifference": {
+            "path": "/21/content",
+            "commonValueChars": 0,
+            "previousChars": 87,
+            "currentChars": 127
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 28982,
+              "currentFullPromptChars": 65448,
+              "percent": 44.28248380393595
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 30270,
+              "currentFullPromptChars": 67506,
+              "percent": 44.84045862589992
+            },
+            "panelJSON": {
+              "commonPrefixChars": 30289,
+              "currentFullPromptChars": 67507,
+              "percent": 44.86793962107633
+            }
+          }
+        },
+        {
+          "previousRound": 5,
+          "currentRound": 6,
+          "fullyIdenticalPrefixMessages": 21,
+          "firstDifference": {
+            "path": "/21/content",
+            "commonValueChars": 0,
+            "previousChars": 127,
+            "currentChars": 135
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 28982,
+              "currentFullPromptChars": 65442,
+              "percent": 44.28654380978577
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 30270,
+              "currentFullPromptChars": 67500,
+              "percent": 44.84444444444444
+            },
+            "panelJSON": {
+              "commonPrefixChars": 30289,
+              "currentFullPromptChars": 67501,
+              "percent": 44.87192782329151
+            }
+          }
+        }
+      ],
+      "aggregates": {
+        "roleContent": {
+          "pairCount": 5,
+          "sumCommonPrefixChars": 144936,
+          "sumCurrentPromptChars": 327873,
+          "weightedPercent": 44.204920807751776,
+          "arithmeticMeanPercent": 44.20641632682294
+        },
+        "canonicalJSON": {
+          "pairCount": 5,
+          "sumCommonPrefixChars": 151411,
+          "sumCurrentPromptChars": 338173,
+          "weightedPercent": 44.77323736667327,
+          "arithmeticMeanPercent": 44.77472845373104
+        },
+        "panelJSON": {
+          "pairCount": 5,
+          "sumCommonPrefixChars": 151484,
+          "sumCurrentPromptChars": 338178,
+          "weightedPercent": 44.7941616545133,
+          "arithmeticMeanPercent": 44.79562694953846
+        }
+      }
+    },
+    "mainProviderCalled": false,
+    "mainProviderCacheUsage": "unknown",
+    "capturedBackendPostProcessingModes": [
+      "merge_tools"
+    ]
+  },
+  "candidate": {
+    "version": "2.6.7",
+    "sourceArtifacts": [
+      {
+        "file": "index.js",
+        "SHA256": "da98f7441675017829bad866ea1d3dd2b6abb66683058cbf093436971271adff",
+        "matchesSealedArtifact": true
+      },
+      {
+        "file": "manifest.json",
+        "SHA256": "28f73c332db300fc9df24d5c107371df6eec5820c2826f970bdcb97e967ff906",
+        "matchesSealedArtifact": true
+      },
+      {
+        "file": "style.css",
+        "SHA256": "d05edd31764ca18ce0f1f04699535c9c76a4dfa6a2875c562efc9e41cf93317c",
+        "matchesSealedArtifact": true
+      }
+    ],
+    "browserLoadedSourceHashNotCapturedDirectly": true,
+    "counts": {
+      "typedNormalMainRequests": 6,
+      "realAuxiliaryAttempts": 6,
+      "realAuxiliaryHTTP200": 6,
+      "savedUserFloors": 6,
+      "savedAssistantFloors": 7,
+      "totalSavedFloors": 13,
+      "distinctInputs": 6,
+      "distinctOriginalArticles": 6
+    },
+    "checks": {
+      "strictSavedRoleAlternation": true,
+      "allSixInputsStoredInUserRole": true,
+      "storedUserMessagesAreDistinct": true,
+      "allSixOriginalArticlesStoredAsAssistantExactlyOnce": true,
+      "articlesIncorrectlyStoredAsUser": 0,
+      "immediatePreviousAssistantArticleInNextRequestExactlyOnce": true,
+      "allEarlierAssistantArticlesRetainedInEveryPrompt": false
+    },
+    "originalInputHashes": [
+      {
+        "round": 1,
+        "SHA256": "5283726ba746fd326f81e7bacec1412603e3ca4c00b960ff2bdcd496529b2c3a"
+      },
+      {
+        "round": 2,
+        "SHA256": "e9670302256d96ff666d19c28439559a50f9679c6cbe05d3d00b9a9159318c39"
+      },
+      {
+        "round": 3,
+        "SHA256": "7dfe8c4eb1ff7caa6597ba1d39ecc816a47639923e4fc042b2859bc203153cb8"
+      },
+      {
+        "round": 4,
+        "SHA256": "89524405392b05749dc84282cdeb9e292c60ba475d7ddf0a24f7c682ca295058"
+      },
+      {
+        "round": 5,
+        "SHA256": "aa1e3742d0678500ff9390a8599f485b959bbb890675e277d2b8210ff6a3e3af"
+      },
+      {
+        "round": 6,
+        "SHA256": "321683a54797612bfc65e8f3a90f08cd3d144d8dc95eec884019827d8169df14"
+      }
+    ],
+    "originalArticleHashes": [
+      {
+        "round": 1,
+        "SHA256": "5198efeb2f232426eebb534c3c9edfdc2dd8f6c34afe7e8ea331724217758527",
+        "verifiedBeforeRoundMarker": true
+      },
+      {
+        "round": 2,
+        "SHA256": "23827f7318c1db5327f17d4ceeb0b32c74b3ca006555257b937608f15dfcf5d7",
+        "verifiedBeforeRoundMarker": true
+      },
+      {
+        "round": 3,
+        "SHA256": "c075d8250d8e4ed3bfc7e050692dc62a004f15d7d1685e6500e9493f3780de17",
+        "verifiedBeforeRoundMarker": true
+      },
+      {
+        "round": 4,
+        "SHA256": "55533b5e3bc805eb931d36e70d0e77d81b669b45ca50ca8ac2fac76d69afbbe1",
+        "verifiedBeforeRoundMarker": true
+      },
+      {
+        "round": 5,
+        "SHA256": "1c2ab26a0b02a5814b30fa58f4bf9f23e722df2443e94db15edc3a675190dc1d",
+        "verifiedBeforeRoundMarker": true
+      },
+      {
+        "round": 6,
+        "SHA256": "2dd6483c9415c6ff29fc518562e6597b598ebfb4ee701703ebb90bf06862e449",
+        "verifiedBeforeRoundMarker": true
+      }
+    ],
+    "primaryActualBrowserRequestEvidence": {
+      "comparisons": [
+        {
+          "previousRound": 1,
+          "currentRound": 2,
+          "fullyIdenticalPrefixMessages": 23,
+          "firstDifference": {
+            "path": "/23/content",
+            "commonValueChars": 0,
+            "previousChars": 2229,
+            "currentChars": 92
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 43029,
+              "currentFullPromptChars": 65309,
+              "percent": 65.88525318103171
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 44483,
+              "currentFullPromptChars": 67390,
+              "percent": 66.00830983825493
+            },
+            "panelJSON": {
+              "commonPrefixChars": 44480,
+              "currentFullPromptChars": 67391,
+              "percent": 66.0028787226781
+            }
+          }
+        },
+        {
+          "previousRound": 2,
+          "currentRound": 3,
+          "fullyIdenticalPrefixMessages": 22,
+          "firstDifference": {
+            "path": "/22/content",
+            "commonValueChars": 0,
+            "previousChars": 24,
+            "currentChars": 92
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 43003,
+              "currentFullPromptChars": 65368,
+              "percent": 65.78601150409986
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 44422,
+              "currentFullPromptChars": 67448,
+              "percent": 65.86110781639188
+            },
+            "panelJSON": {
+              "commonPrefixChars": 44441,
+              "currentFullPromptChars": 67449,
+              "percent": 65.8883007902267
+            }
+          }
+        },
+        {
+          "previousRound": 3,
+          "currentRound": 4,
+          "fullyIdenticalPrefixMessages": 22,
+          "firstDifference": {
+            "path": "/22/content",
+            "commonValueChars": 0,
+            "previousChars": 92,
+            "currentChars": 87
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 43003,
+              "currentFullPromptChars": 66333,
+              "percent": 64.82896898979392
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 44422,
+              "currentFullPromptChars": 68422,
+              "percent": 64.92356259682558
+            },
+            "panelJSON": {
+              "commonPrefixChars": 44441,
+              "currentFullPromptChars": 68423,
+              "percent": 64.95038218143023
+            }
+          }
+        },
+        {
+          "previousRound": 4,
+          "currentRound": 5,
+          "fullyIdenticalPrefixMessages": 22,
+          "firstDifference": {
+            "path": "/22/content",
+            "commonValueChars": 0,
+            "previousChars": 87,
+            "currentChars": 127
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 43003,
+              "currentFullPromptChars": 65457,
+              "percent": 65.6965641566219
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 44422,
+              "currentFullPromptChars": 67537,
+              "percent": 65.77431630069444
+            },
+            "panelJSON": {
+              "commonPrefixChars": 44441,
+              "currentFullPromptChars": 67538,
+              "percent": 65.8014747253398
+            }
+          }
+        },
+        {
+          "previousRound": 5,
+          "currentRound": 6,
+          "fullyIdenticalPrefixMessages": 22,
+          "firstDifference": {
+            "path": "/22/content",
+            "commonValueChars": 0,
+            "previousChars": 127,
+            "currentChars": 135
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 43003,
+              "currentFullPromptChars": 65451,
+              "percent": 65.70258666788895
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 44422,
+              "currentFullPromptChars": 67531,
+              "percent": 65.78016022271254
+            },
+            "panelJSON": {
+              "commonPrefixChars": 44441,
+              "currentFullPromptChars": 67532,
+              "percent": 65.80732097376058
+            }
+          }
+        }
+      ],
+      "aggregates": {
+        "roleContent": {
+          "pairCount": 5,
+          "sumCommonPrefixChars": 215041,
+          "sumCurrentPromptChars": 327918,
+          "weightedPercent": 65.57767490653151,
+          "arithmeticMeanPercent": 65.57987689988727
+        },
+        "canonicalJSON": {
+          "pairCount": 5,
+          "sumCommonPrefixChars": 222171,
+          "sumCurrentPromptChars": 338328,
+          "weightedPercent": 65.66734056891536,
+          "arithmeticMeanPercent": 65.66949135497586
+        },
+        "panelJSON": {
+          "pairCount": 5,
+          "sumCommonPrefixChars": 222244,
+          "sumCurrentPromptChars": 338333,
+          "weightedPercent": 65.68794649058768,
+          "arithmeticMeanPercent": 65.69007147868707
+        }
+      }
+    },
+    "mainProviderCalled": false,
+    "mainProviderCacheUsage": "unknown",
+    "capturedBackendPostProcessingModes": [
+      "merge_tools"
+    ]
+  },
+  "liveGroupImprovementPercentagePoints": {
+    "roleContent": {
+      "weighted": 21.372754098779737,
+      "arithmeticMean": 21.373460573064328
+    },
+    "canonicalJSON": {
+      "weighted": 20.894103202242093,
+      "arithmeticMean": 20.894762901244817
+    },
+    "panelJSON": {
+      "weighted": 20.893784836074374,
+      "arithmeticMean": 20.894444529148615
+    }
+  },
+  "pairedFidelity": {
+    "allSixCandidateRequestsMatchActualPairedBaselineAfterUndoingOnlyIntendedLayout": true,
+    "allNonSystemCompleteMessagesAndRelativeOrderIdentical": true,
+    "verifiedCompleteFormatBlocksPerRound": 2,
+    "allFormatBodiesRolesAndOrderIdentical": true,
+    "movedLiteralSystemPrefixChars": 14012,
+    "sourceEntries": 4,
+    "eachSourceEntryOriginalOccursExactlyOnceAsSystem": true,
+    "unknownTailChars": 2229,
+    "unknownTailExactlyUnchangedAndAtOriginalPosition": true,
+    "totalOriginalContentCharactersPreserved": true,
+    "stableBaselineMessagesVerifiedAfterRejoiningIntendedSplit": 29,
+    "unrecognizedTailWasNotHoisted": true,
+    "firstAndSixthSourceHashes": {
+      "firstRound": 1,
+      "lastRound": 6,
+      "prefixChars": 14012,
+      "firstCapturedPrefixSHA256": "aaff734f64dfd01ba1467fe55d43185610f08a0f99548f052096eab0f7da2782",
+      "sixthCapturedPrefixSHA256": "aaff734f64dfd01ba1467fe55d43185610f08a0f99548f052096eab0f7da2782",
+      "prefixHashesEqual": true,
+      "firstSourceEntryHashes": [
+        "6578afd8a6adc527b5f08ad1a43bb2faae90d87ae88e8618af6e7a502fbb4b36",
+        "f4b8547bf99966000280621aa3f03e96bf08e8e755f28db4d48c953cfe155bcf",
+        "1b0cdc9ae66677b484d6807c3c16f1ed7f54a9d2a061cca27990cdb854c7af5d",
+        "0c993f18480c214406d9736d23e341b931f903009d8f8779f398bbb0d38ff6b2"
+      ],
+      "sixthSourceEntryHashes": [
+        "6578afd8a6adc527b5f08ad1a43bb2faae90d87ae88e8618af6e7a502fbb4b36",
+        "f4b8547bf99966000280621aa3f03e96bf08e8e755f28db4d48c953cfe155bcf",
+        "1b0cdc9ae66677b484d6807c3c16f1ed7f54a9d2a061cca27990cdb854c7af5d",
+        "0c993f18480c214406d9736d23e341b931f903009d8f8779f398bbb0d38ff6b2"
+      ],
+      "allFourSourceEntryHashesEqual": true
+    },
+    "perRound": [
+      {
+        "round": 1,
+        "prefixChars": 14012,
+        "prefixSHA256": "aaff734f64dfd01ba1467fe55d43185610f08a0f99548f052096eab0f7da2782",
+        "nonSystemMessagesEqual": true,
+        "formatBodiesRolesAndOrderEqual": true,
+        "sourceEntryCount": 4,
+        "allSourceOriginalsOnce": true,
+        "unknownTail": {
+          "chars": 2229,
+          "originalPositionAfterIgnoringInsertedPrefix": true,
+          "exactPairedBaselineTail": true
+        },
+        "undoingLayoutEqualsActualBaselineMessages": true
+      },
+      {
+        "round": 2,
+        "prefixChars": 14012,
+        "prefixSHA256": "aaff734f64dfd01ba1467fe55d43185610f08a0f99548f052096eab0f7da2782",
+        "nonSystemMessagesEqual": true,
+        "formatBodiesRolesAndOrderEqual": true,
+        "sourceEntryCount": 4,
+        "allSourceOriginalsOnce": true,
+        "unknownTail": {
+          "chars": 2229,
+          "originalPositionAfterIgnoringInsertedPrefix": true,
+          "exactPairedBaselineTail": true
+        },
+        "undoingLayoutEqualsActualBaselineMessages": true
+      },
+      {
+        "round": 3,
+        "prefixChars": 14012,
+        "prefixSHA256": "aaff734f64dfd01ba1467fe55d43185610f08a0f99548f052096eab0f7da2782",
+        "nonSystemMessagesEqual": true,
+        "formatBodiesRolesAndOrderEqual": true,
+        "sourceEntryCount": 4,
+        "allSourceOriginalsOnce": true,
+        "unknownTail": {
+          "chars": 2229,
+          "originalPositionAfterIgnoringInsertedPrefix": true,
+          "exactPairedBaselineTail": true
+        },
+        "undoingLayoutEqualsActualBaselineMessages": true
+      },
+      {
+        "round": 4,
+        "prefixChars": 14012,
+        "prefixSHA256": "aaff734f64dfd01ba1467fe55d43185610f08a0f99548f052096eab0f7da2782",
+        "nonSystemMessagesEqual": true,
+        "formatBodiesRolesAndOrderEqual": true,
+        "sourceEntryCount": 4,
+        "allSourceOriginalsOnce": true,
+        "unknownTail": {
+          "chars": 2229,
+          "originalPositionAfterIgnoringInsertedPrefix": true,
+          "exactPairedBaselineTail": true
+        },
+        "undoingLayoutEqualsActualBaselineMessages": true
+      },
+      {
+        "round": 5,
+        "prefixChars": 14012,
+        "prefixSHA256": "aaff734f64dfd01ba1467fe55d43185610f08a0f99548f052096eab0f7da2782",
+        "nonSystemMessagesEqual": true,
+        "formatBodiesRolesAndOrderEqual": true,
+        "sourceEntryCount": 4,
+        "allSourceOriginalsOnce": true,
+        "unknownTail": {
+          "chars": 2229,
+          "originalPositionAfterIgnoringInsertedPrefix": true,
+          "exactPairedBaselineTail": true
+        },
+        "undoingLayoutEqualsActualBaselineMessages": true
+      },
+      {
+        "round": 6,
+        "prefixChars": 14012,
+        "prefixSHA256": "aaff734f64dfd01ba1467fe55d43185610f08a0f99548f052096eab0f7da2782",
+        "nonSystemMessagesEqual": true,
+        "formatBodiesRolesAndOrderEqual": true,
+        "sourceEntryCount": 4,
+        "allSourceOriginalsOnce": true,
+        "unknownTail": {
+          "chars": 2229,
+          "originalPositionAfterIgnoringInsertedPrefix": true,
+          "exactPairedBaselineTail": true
+        },
+        "undoingLayoutEqualsActualBaselineMessages": true
+      }
+    ],
+    "exactOriginalKeyOrderJSONSerializationCheck": [
+      {
+        "round": 1,
+        "JSONSerializedMessagesExactlyEqual": true
+      },
+      {
+        "round": 2,
+        "JSONSerializedMessagesExactlyEqual": true
+      },
+      {
+        "round": 3,
+        "JSONSerializedMessagesExactlyEqual": true
+      },
+      {
+        "round": 4,
+        "JSONSerializedMessagesExactlyEqual": true
+      },
+      {
+        "round": 5,
+        "JSONSerializedMessagesExactlyEqual": true
+      },
+      {
+        "round": 6,
+        "JSONSerializedMessagesExactlyEqual": true
+      }
+    ]
+  },
+  "layoutOnlyCounterfactual": {
+    "actualSeparateLiveGroup": false,
+    "additionalModelRequests": 0,
+    "definition": "On each already captured candidate request, move only the unique hoisted system prefix back to its uniquely witnessed original system tail. Auxiliary output, input, reply, runtime values and all original content characters stay unchanged. This is not a separately generated baseline.",
+    "rounds": 6,
+    "allSixReversedCandidateMessagesExactlyEqualActualBaseline": true,
+    "reversedLayoutMetrics": {
+      "comparisons": [
+        {
+          "previousRound": 1,
+          "currentRound": 2,
+          "fullyIdenticalPrefixMessages": 22,
+          "firstDifference": {
+            "path": "/22/content",
+            "commonValueChars": 0,
+            "previousChars": 16241,
+            "currentChars": 92
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 29008,
+              "currentFullPromptChars": 65300,
+              "percent": 44.422664624808576
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 30331,
+              "currentFullPromptChars": 67359,
+              "percent": 45.028875131756706
+            },
+            "panelJSON": {
+              "commonPrefixChars": 30328,
+              "currentFullPromptChars": 67360,
+              "percent": 45.02375296912114
+            }
+          }
+        },
+        {
+          "previousRound": 2,
+          "currentRound": 3,
+          "fullyIdenticalPrefixMessages": 21,
+          "firstDifference": {
+            "path": "/21/content",
+            "commonValueChars": 0,
+            "previousChars": 24,
+            "currentChars": 92
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 28982,
+              "currentFullPromptChars": 65359,
+              "percent": 44.34278370232103
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 30270,
+              "currentFullPromptChars": 67417,
+              "percent": 44.899654389842325
+            },
+            "panelJSON": {
+              "commonPrefixChars": 30289,
+              "currentFullPromptChars": 67418,
+              "percent": 44.92717078525023
+            }
+          }
+        },
+        {
+          "previousRound": 3,
+          "currentRound": 4,
+          "fullyIdenticalPrefixMessages": 21,
+          "firstDifference": {
+            "path": "/21/content",
+            "commonValueChars": 0,
+            "previousChars": 92,
+            "currentChars": 87
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 28982,
+              "currentFullPromptChars": 66324,
+              "percent": 43.69760569326338
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 30270,
+              "currentFullPromptChars": 68391,
+              "percent": 44.260209676711845
+            },
+            "panelJSON": {
+              "commonPrefixChars": 30289,
+              "currentFullPromptChars": 68392,
+              "percent": 44.287343548953096
+            }
+          }
+        },
+        {
+          "previousRound": 4,
+          "currentRound": 5,
+          "fullyIdenticalPrefixMessages": 21,
+          "firstDifference": {
+            "path": "/21/content",
+            "commonValueChars": 0,
+            "previousChars": 87,
+            "currentChars": 127
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 28982,
+              "currentFullPromptChars": 65448,
+              "percent": 44.28248380393595
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 30270,
+              "currentFullPromptChars": 67506,
+              "percent": 44.84045862589992
+            },
+            "panelJSON": {
+              "commonPrefixChars": 30289,
+              "currentFullPromptChars": 67507,
+              "percent": 44.86793962107633
+            }
+          }
+        },
+        {
+          "previousRound": 5,
+          "currentRound": 6,
+          "fullyIdenticalPrefixMessages": 21,
+          "firstDifference": {
+            "path": "/21/content",
+            "commonValueChars": 0,
+            "previousChars": 127,
+            "currentChars": 135
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 28982,
+              "currentFullPromptChars": 65442,
+              "percent": 44.28654380978577
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 30270,
+              "currentFullPromptChars": 67500,
+              "percent": 44.84444444444444
+            },
+            "panelJSON": {
+              "commonPrefixChars": 30289,
+              "currentFullPromptChars": 67501,
+              "percent": 44.87192782329151
+            }
+          }
+        }
+      ],
+      "aggregates": {
+        "roleContent": {
+          "pairCount": 5,
+          "sumCommonPrefixChars": 144936,
+          "sumCurrentPromptChars": 327873,
+          "weightedPercent": 44.204920807751776,
+          "arithmeticMeanPercent": 44.20641632682294
+        },
+        "canonicalJSON": {
+          "pairCount": 5,
+          "sumCommonPrefixChars": 151411,
+          "sumCurrentPromptChars": 338173,
+          "weightedPercent": 44.77323736667327,
+          "arithmeticMeanPercent": 44.77472845373104
+        },
+        "panelJSON": {
+          "pairCount": 5,
+          "sumCommonPrefixChars": 151484,
+          "sumCurrentPromptChars": 338178,
+          "weightedPercent": 44.7941616545133,
+          "arithmeticMeanPercent": 44.79562694953846
+        }
+      }
+    },
+    "actualCandidateLayoutMetrics": {
+      "comparisons": [
+        {
+          "previousRound": 1,
+          "currentRound": 2,
+          "fullyIdenticalPrefixMessages": 23,
+          "firstDifference": {
+            "path": "/23/content",
+            "commonValueChars": 0,
+            "previousChars": 2229,
+            "currentChars": 92
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 43029,
+              "currentFullPromptChars": 65309,
+              "percent": 65.88525318103171
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 44483,
+              "currentFullPromptChars": 67390,
+              "percent": 66.00830983825493
+            },
+            "panelJSON": {
+              "commonPrefixChars": 44480,
+              "currentFullPromptChars": 67391,
+              "percent": 66.0028787226781
+            }
+          }
+        },
+        {
+          "previousRound": 2,
+          "currentRound": 3,
+          "fullyIdenticalPrefixMessages": 22,
+          "firstDifference": {
+            "path": "/22/content",
+            "commonValueChars": 0,
+            "previousChars": 24,
+            "currentChars": 92
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 43003,
+              "currentFullPromptChars": 65368,
+              "percent": 65.78601150409986
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 44422,
+              "currentFullPromptChars": 67448,
+              "percent": 65.86110781639188
+            },
+            "panelJSON": {
+              "commonPrefixChars": 44441,
+              "currentFullPromptChars": 67449,
+              "percent": 65.8883007902267
+            }
+          }
+        },
+        {
+          "previousRound": 3,
+          "currentRound": 4,
+          "fullyIdenticalPrefixMessages": 22,
+          "firstDifference": {
+            "path": "/22/content",
+            "commonValueChars": 0,
+            "previousChars": 92,
+            "currentChars": 87
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 43003,
+              "currentFullPromptChars": 66333,
+              "percent": 64.82896898979392
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 44422,
+              "currentFullPromptChars": 68422,
+              "percent": 64.92356259682558
+            },
+            "panelJSON": {
+              "commonPrefixChars": 44441,
+              "currentFullPromptChars": 68423,
+              "percent": 64.95038218143023
+            }
+          }
+        },
+        {
+          "previousRound": 4,
+          "currentRound": 5,
+          "fullyIdenticalPrefixMessages": 22,
+          "firstDifference": {
+            "path": "/22/content",
+            "commonValueChars": 0,
+            "previousChars": 87,
+            "currentChars": 127
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 43003,
+              "currentFullPromptChars": 65457,
+              "percent": 65.6965641566219
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 44422,
+              "currentFullPromptChars": 67537,
+              "percent": 65.77431630069444
+            },
+            "panelJSON": {
+              "commonPrefixChars": 44441,
+              "currentFullPromptChars": 67538,
+              "percent": 65.8014747253398
+            }
+          }
+        },
+        {
+          "previousRound": 5,
+          "currentRound": 6,
+          "fullyIdenticalPrefixMessages": 22,
+          "firstDifference": {
+            "path": "/22/content",
+            "commonValueChars": 0,
+            "previousChars": 127,
+            "currentChars": 135
+          },
+          "metrics": {
+            "roleContent": {
+              "commonPrefixChars": 43003,
+              "currentFullPromptChars": 65451,
+              "percent": 65.70258666788895
+            },
+            "canonicalJSON": {
+              "commonPrefixChars": 44422,
+              "currentFullPromptChars": 67531,
+              "percent": 65.78016022271254
+            },
+            "panelJSON": {
+              "commonPrefixChars": 44441,
+              "currentFullPromptChars": 67532,
+              "percent": 65.80732097376058
+            }
+          }
+        }
+      ],
+      "aggregates": {
+        "roleContent": {
+          "pairCount": 5,
+          "sumCommonPrefixChars": 215041,
+          "sumCurrentPromptChars": 327918,
+          "weightedPercent": 65.57767490653151,
+          "arithmeticMeanPercent": 65.57987689988727
+        },
+        "canonicalJSON": {
+          "pairCount": 5,
+          "sumCommonPrefixChars": 222171,
+          "sumCurrentPromptChars": 338328,
+          "weightedPercent": 65.66734056891536,
+          "arithmeticMeanPercent": 65.66949135497586
+        },
+        "panelJSON": {
+          "pairCount": 5,
+          "sumCommonPrefixChars": 222244,
+          "sumCurrentPromptChars": 338333,
+          "weightedPercent": 65.68794649058768,
+          "arithmeticMeanPercent": 65.69007147868707
+        }
+      }
+    },
+    "weightedImprovementPercentagePoints": {
+      "roleContent": 21.372754098779737,
+      "canonicalJSON": 20.894103202242093,
+      "panelJSON": 20.893784836074374
+    }
+  },
+  "historyLimitation": "Both saved chats contain all 13 floors with correct assistant/user roles. Prompt assembly omits older articles; nine old saved floors have is_system=true while is_user retains the visible role. This is reported separately and not attributed to the optimizer.",
+  "limitations": [
+    "Character-prefix ratios do not establish main-provider token cache hits.",
+    "Real auxiliary API outputs and host initialization metadata can vary; identical UI-initialized database semantic state is not claimed. For these six paired captures, undoing only the intended layout made the complete main messages equal byte for byte.",
+    "Frozen on-disk extension artifacts matched their recorded source hashes; the browser-loaded module SHA was not independently captured for every generation."
+  ],
+  "privatePromptTextIncluded": false,
+  "credentialsEndpointsAndPrivatePathsIncluded": false
+}

@@ -13,7 +13,8 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
 function harness(overrides = {}) {
     const host = {
         mainApi: 'openai',
-        extensionSettings: {},
+        // Existing relocation cases exercise the explicit legacy layout.
+        extensionSettings: { cacheOptimizer: { preserveStructure: false } },
         chatCompletionSettings: { chat_completion_source: 'vertexai', use_sysprompt: true },
         chat: [],
         getCurrentChatId: () => 'compatibility-test-chat',

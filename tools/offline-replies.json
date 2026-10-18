@@ -1,0 +1,41 @@
+{
+  "description": "Public-domain article excerpts fetched once during preparation. The offline runner never downloads them or calls a model.",
+  "replies": [
+    {
+      "title": "桃花源记·节选一",
+      "author": "陶渊明",
+      "source": "https://zh.wikisource.org/zh-hans/桃花源記",
+      "text": "晋太元中，武陵人捕鱼为业。缘溪行，忘路之远近。忽逢桃花林，夹岸数百步，中无杂树，芳草鲜美，落英缤纷。渔人甚异之。复前行，欲穷其林。"
+    },
+    {
+      "title": "岳阳楼记·节选一",
+      "author": "范仲淹",
+      "source": "https://zh.wikisource.org/zh/岳陽樓記",
+      "text": "慶曆四年春，滕子京謫守巴陵郡。越明年，政通人和，百廢具興，乃重修岳陽樓，增其舊制，刻唐賢今人詩賦於其上；屬予作文以記之。"
+    },
+    {
+      "title": "兰亭集序·节选一",
+      "author": "王羲之",
+      "source": "https://zh.wikisource.org/zh-hans/蘭亭集序",
+      "text": "永和九年，岁在癸丑，暮春之初，会于会稽山阴之兰亭，修禊事也。群贤毕至，少长咸集。此地有崇山峻岭，茂林修竹；又有清流激湍，映带左右。引以为流觞曲水，列坐其次。虽无丝竹管弦之盛，一觞一咏，亦足以畅叙幽情。"
+    },
+    {
+      "title": "桃花源记·节选二",
+      "author": "陶渊明",
+      "source": "https://zh.wikisource.org/zh-hans/桃花源記",
+      "text": "林尽水源，便得一山，山有小口，彷彿若有光。便舍船，从口入，初极狭，才通人。复行数十步，豁然开朗。土地平旷，屋舍俨然。有良田、美池、桑竹之属。阡陌交通，鸡犬相闻。其中往来种作，男女衣著，悉如外人。黄发垂髫，并怡然自乐。"
+    },
+    {
+      "title": "岳阳楼记·节选二",
+      "author": "范仲淹",
+      "source": "https://zh.wikisource.org/zh/岳陽樓記",
+      "text": "予觀夫巴陵勝狀，在洞庭一湖。銜遠山，吞長江，浩浩湯湯，橫無際涯；朝暉夕陰，氣象萬千；此則岳陽樓之大觀也，前人之述備矣。然則北通巫峽，南極瀟湘，遷客騷人，多會於此，覽物之情，得無異乎？"
+    },
+    {
+      "title": "兰亭集序·节选二",
+      "author": "王羲之",
+      "source": "https://zh.wikisource.org/zh-hans/蘭亭集序",
+      "text": "是日也，天朗气清，惠风和畅；仰观宇宙之大，俯察品类之盛；所以游目骋怀，足以极视听之娱，信可乐也。夫人之相与，俯仰一世，或取诸怀抱，悟言一室之内，或因寄所托，放浪形骸之外。"
+    }
+  ]
+}

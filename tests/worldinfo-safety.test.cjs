@@ -134,6 +134,7 @@ test('author-note entries stay in their native slot because their effective role
 
 test('native system depth entries can still be hoisted without creating separate activation records', () => {
     const h = harness();
+    h.settings({ preserveStructure: false });
     const rows = [entry({ constant: true, position: 4, depth: 2, role: 0 })];
     h.route(rows);
     assert.equal(rows.length, 1);
@@ -166,7 +167,7 @@ test('Vertex ignores sticky mode and top-depth routing creates no artificial act
         chat_completion_source: 'vertexai',
         prompt_order: [{ character_id: 100001, order: [{ identifier: 'chatHistory' }, { identifier: 'worldInfoBefore' }] }],
     } });
-    h.settings({ stickyLore: true, stickyTurns: 6 });
+    h.settings({ stickyLore: true, stickyTurns: 6, preserveStructure: false });
     const rows = [entry(), entry({ uid: 2, constant: true, order: 200 })];
     h.route(rows);
     assert.equal(rows.length, 2);
@@ -174,4 +175,31 @@ test('Vertex ignores sticky mode and top-depth routing creates no artificial act
     assert.equal(rows[0].sticky, undefined);
     assert.equal(rows[1].depth, 10000);
     assert.deepEqual(scan(rows).map(item => item.uid), [2]);
+});
+
+test('structure protection preserves fixed lore positions, roles, order and competing budget admission', () => {
+    for (const preserveStructure of [true, false]) {
+        const h = harness();
+        h.settings({ preserveStructure });
+        const rows = [entry({ constant: true, position: 4, order: 10, depth: 2 }),
+            entry({ uid: 2, comment: 'TavernDB-ACU-synthetic', constant: true, order: 1000 })];
+        const before = structuredClone(rows), admitted = scan(rows, { budget: 15 }).map(item => item.uid);
+        h.route(rows);
+        assert.equal(rows[0].order, 10);
+        assert.equal(rows[1].order, 1000);
+        assert.deepEqual(scan(rows, { budget: 15 }).map(item => item.uid), admitted);
+        if (preserveStructure) assert.deepEqual(rows[0], before[0]);
+        assert.equal(rows[1].position, 4);
+        assert.equal(rows[1].depth, 0);
+    }
+});
+
+test('default structure protection keeps fixed before and after slots when the preset places them after history', () => {
+    const h = harness({ chatCompletionSettings: { chat_completion_source: 'vertexai',
+        prompt_order: [{ character_id: 100001, order: [{ identifier: 'chatHistory' },
+            { identifier: 'worldInfoBefore' }, { identifier: 'worldInfoAfter' }] }] } });
+    const rows = [entry({ constant: true }), entry({ constant: true, uid: 2, position: 1 })];
+    const before = structuredClone(rows);
+    h.route(rows);
+    assert.deepEqual(rows, before);
 });

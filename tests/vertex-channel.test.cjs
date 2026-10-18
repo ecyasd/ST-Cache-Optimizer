@@ -17,7 +17,7 @@ const body = (provider = 'vertexai') => ({ type: 'normal', model: 'gemini-offlin
 const plain = value => JSON.parse(JSON.stringify(value));
 
 function harness(mainApi = 'openai', provider = 'vertexai') {
-    const host = { mainApi, extensionSettings: {}, chatCompletionSettings: { chat_completion_source: provider },
+    const host = { mainApi, extensionSettings: { cacheOptimizer: { preserveStructure: false } }, chatCompletionSettings: { chat_completion_source: provider },
         chat: core(), getCurrentChatId: () => 'offline-vertex-channel', saveSettingsDebounced() {},
         eventTypes: { CHAT_COMPLETION_SETTINGS_READY: 'settings' },
         eventSource: { on() {}, makeLast() {}, removeListener() {} } };

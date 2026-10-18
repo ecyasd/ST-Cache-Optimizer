@@ -10,7 +10,7 @@ const core = () => [{ is_user: false, mes: '完整的宿主正文。<render-only
 const messages = () => [{ role: 'system', content: '固定首规则。' }, { role: 'assistant', content: core()[0].mes },
     { role: 'system', content: '本轮动态资料。' }, { role: 'user', content: core()[1].mes }];
 const plain = value => value == null ? value : JSON.parse(JSON.stringify(value));
-function harness() {
+function harness({ legacyRelocation = true } = {}) {
     const host = { mainApi: 'openai', extensionSettings: {}, chatCompletionSettings: { chat_completion_source: 'vertexai' },
         chat: core(), getCurrentChatId: () => 'identity-fixture', saveSettingsDebounced() {},
         eventTypes: { CHAT_COMPLETION_SETTINGS_READY: 'settings' }, eventSource: { on() {}, makeLast() {}, removeListener() {} } };
@@ -20,6 +20,9 @@ function harness() {
         SillyTavern: { getContext: () => host } });
     vm.runInContext(source, sandbox);
     const call = (name, ...args) => { sandbox.args = args; return vm.runInContext(`${name}(...args)`, sandbox); };
+    // Identity regressions below retain their legacy relocation assertions.
+    // Structure preservation has a separate test using the actual defaults.
+    if (legacyRelocation) call('settings').preserveStructure = false;
     return { host, call, evaluate: expression => vm.runInContext(expression, sandbox),
         start() { call('onGenerationStarted', 'normal', {}, false); call('captureGenerationHistory', core(), 100000, () => {}, 'normal'); },
         prompt(chat, managerMessages = chat) {
@@ -44,6 +47,20 @@ test('verified native message identities survive one in-place template pass with
     assert.deepEqual(plain(h.call('findHistoryRange', final)), { start: 1, end: 2 });
     assert.deepEqual(plain(h.call('findHistoryRange', JSON.parse(JSON.stringify(final)))), { start: 1, end: 2 });
     assert.ok(h.evaluate('generationDiagnostics.events.some(event => event.event === "processed-confirmed")'));
+    assert.ok(h.evaluate('generationDiagnostics.events.some(event => event.event === "identity-final-confirmed")'));
+});
+
+test('default structure preservation confirms processed identity while keeping unknown system blocks in place', () => {
+    const h = harness({ legacyRelocation: false });
+    assert.equal(h.call('settings').preserveStructure, true);
+    h.start(); const prepared = messages(); h.prompt(prepared);
+    prepared[1].content = '模板已原位加工的完整正文。';
+    prepared[3].content = '数据库已原位加工的完整输入。';
+    const before = structuredClone(prepared); h.final(prepared);
+    assert.deepEqual(prepared, before);
+    assert.equal(prepared[2].content, '本轮动态资料。');
+    assert.equal(h.evaluate('generationScope.settingsHandled'), true);
+    assert.deepEqual(plain(h.call('findHistoryRange', prepared)), { start: 1, end: 3 });
     assert.ok(h.evaluate('generationDiagnostics.events.some(event => event.event === "identity-final-confirmed")'));
 });
 
@@ -93,4 +110,84 @@ test('an internal duplicate quote prevents initial whole-sequence identity autho
     const prepared = [{ role: 'assistant', content: extendedCore[0].mes }, { role: 'user', content: '继续' },
         { role: 'user', content: '继续' }, { role: 'assistant', content: extendedCore[2].mes }, { role: 'user', content: extendedCore[3].mes }];
     h.prompt(prepared); assert.equal(h.evaluate('generationHistorySnapshot.identityGroups.length'), 0);
+});
+
+const budgetCore = () => [{ is_user: false, mes: '仍在正式 core 中的较早叙述。' },
+    { is_user: true, mes: '仍在正式 core 中的较早输入。' }, ...core()];
+const budgetMessages = () => budgetCore().map(message => ({
+    role: message.is_user ? 'user' : 'assistant', content: message.mes,
+}));
+
+test('a native budgeted suffix retains its own identity through in-place template processing', () => {
+    const h = harness(), official = budgetCore();
+    h.call('onGenerationStarted', 'normal', {}, false);
+    h.call('captureGenerationHistory', official, 100000, () => {}, 'normal');
+    const retained = budgetMessages().slice(2);
+    retained.splice(1, 0, { role: 'system', content: '正文预算后插入的最新动态资料。' });
+    h.prompt(retained);
+    assert.equal(h.evaluate('generationHistorySnapshot.identityGroups.length'), 1);
+    assert.equal(h.evaluate('generationHistorySnapshot.identityGroups[0].sourceStart'), 2);
+    retained[0].content = '正文模板原位加工后的实际叙述。';
+    retained[2].content = '数据库原位包装后的完整当前输入。';
+    const beforeCore = structuredClone(official);
+    h.final(retained);
+    assert.equal(retained.at(-1).content, '正文预算后插入的最新动态资料。');
+    assert.deepEqual(plain(h.call('findHistoryRange', retained)), { start: 0, end: 1 });
+    assert.deepEqual(official, beforeCore);
+});
+
+test('an earlier complete helper proof cannot block the main native budgeted suffix', () => {
+    const h = harness();
+    h.call('onGenerationStarted', 'normal', {}, false);
+    h.call('captureGenerationHistory', budgetCore(), 100000, () => {}, 'normal');
+    const helper = budgetMessages(); h.prompt(helper);
+    const helperBefore = structuredClone(helper);
+    const main = budgetMessages().slice(2);
+    main.splice(1, 0, { role: 'system', content: '真实正文当前动态资料。' });
+    h.prompt(main);
+    assert.equal(h.evaluate('generationHistorySnapshot.identityGroups.length'), 2);
+    main[0].content = '主模板加工后的最新叙述。';
+    main[2].content = '主数据库加工后的最新输入。';
+    h.final(main);
+    assert.equal(main.at(-1).content, '真实正文当前动态资料。');
+    assert.deepEqual(plain(h.call('findHistoryRange', main)), { start: 0, end: 1 });
+    assert.deepEqual(helper, helperBefore);
+});
+
+test('a shared-object helper suffix never overwrites or shortens a complete main identity proof', () => {
+    const h = harness();
+    h.call('onGenerationStarted', 'normal', {}, false);
+    h.call('captureGenerationHistory', budgetCore(), 100000, () => {}, 'normal');
+    const main = budgetMessages();
+    main.splice(1, 0, { role: 'system', content: '较早真实历史中间的动态资料。' });
+    h.prompt(main);
+    h.prompt(main.slice(3));
+    for (const message of main) if (message.role !== 'system') message.content += '原位模板加工。';
+    h.final(main);
+    assert.equal(main.at(-1).content, '较早真实历史中间的动态资料。');
+    assert.equal(h.evaluate('processedHistorySnapshot.entries.length'), 4);
+    assert.deepEqual(plain(h.call('findHistoryRange', main)), { start: 0, end: 3 });
+});
+
+test('a budgeted identity proof never authorizes a clone or hides a surviving older witness', () => {
+    for (const mode of ['clone', 'unproved-truncation', 'older-survivor', 'independent-proof']) {
+        const h = harness();
+        h.call('onGenerationStarted', 'normal', {}, false);
+        h.call('captureGenerationHistory', budgetCore(), 100000, () => {}, 'normal');
+        const complete = budgetMessages(); h.prompt(complete);
+        const suffix = complete.slice(2);
+        if (mode !== 'unproved-truncation') h.prompt(suffix);
+        let final = suffix.slice();
+        if (mode === 'clone') final = structuredClone(final);
+        if (mode === 'older-survivor') final.unshift(complete[0]);
+        if (mode === 'independent-proof') {
+            const independent = budgetMessages().slice(2); h.prompt(independent);
+            final = [...complete, ...independent];
+        }
+        final.splice(final.length - 1, 0, { role: 'system', content: '没有完整许可时应保持原位的资料。' });
+        const before = structuredClone(final); h.final(final);
+        assert.deepEqual(final, before, mode);
+        assert.equal(h.call('findHistoryRange', final), null, mode);
+        assert.equal(h.evaluate('generationScope.settingsHandled'), false, mode);
+    }
 });

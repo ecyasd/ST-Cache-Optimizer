@@ -1,4 +1,4 @@
-// 缓存优化 v2.6.5：仅处理 Vertex 正文，按来源路由数据库召回。
+// 缓存优化 v2.6.7：仅处理 Vertex 正文，按本轮激活来源有限前移常驻世界书。
 // 仅修改本轮扫描/请求副本；请求相似度和服务端缓存 token 分开报告。
 // 相同前缀能提高隐式缓存机会，但实际命中以 API 响应为准。
 
@@ -7,6 +7,7 @@ const DEFAULTS = Object.freeze({
     enabled: true,
     routeWorldInfo: true,
     hoistStatic: true,
+    preserveStructure: true,
     learn: true,
     stickyLore: false,
     stickyTurns: 6,
@@ -32,7 +33,6 @@ const FIXED_SYSTEM_PLACEHOLDER = '【固定规则已置于系统指令】';
 const TOP_DEPTH = 10000;
 const POS = { before: 0, after: 1, anTop: 2, anBottom: 3, atDepth: 4, emTop: 5, emBottom: 6, outlet: 7 };
 const ROLE_SYSTEM = 0;
-const HOIST_ORDER_BASE = 100000;
 const MAX_LEARNED = 30;
 const MAX_LEARNING_SCOPES = 50;
 const LEARNED_TTL = 30 * 24 * 60 * 60 * 1000;
@@ -47,9 +47,14 @@ const DYNAMIC_MACRO = /\{\{(roll|random|pick|time|date|weekday|isotime|isodate|d
 const DYNAMIC_TAG = /<status_current_variables>\s*(<%|\{\{)/i;
 const SHUJUKU_TEMPLATE = /\{\[\s*(?:db|sql)\b|\$(?:random|calc|max|min)\b|<(?:random|calc|max|min|if)\b/i;
 const IZUMI_MEMORY = /<!--\s*IZM7_[\w-]+\s*-->\s*<KonataExtraInformation>[\s\S]*?<\/KonataExtraInformation>/g;
+const RUNTIME_SYSTEM_RECORDS = /^【本轮江湖介入】启用后第\d+轮；实际玩家回合序号\d+，玩家楼层\d+。[^\n]*同轮续写不新开第二个事件。(?=\n|$)|^<此刻运势>[^\S\n]*\d{1,3}[^\S\n]*<\/此刻运势>[^\S\n]*\n同一回合各项不同行动共用此值。[^\n]*不在正文展示运势。(?=\n|$)/gm;
 
 function isShujukuEntry(entry) {
     if (!settings().compatShujuku) return false;
+    return hasShujukuOwnership(entry);
+}
+
+function hasShujukuOwnership(entry) {
     const raw = String(entry.comment ?? entry.name ?? '');
     const marker = raw.match(/<!--\s*ACU_CUSTOM_TABLE_EXPORT_V1\s+({[\s\S]*?})\s*-->/);
     if (marker) {
@@ -158,7 +163,178 @@ function isMainGenerationScope() {
 function onWorldInfoEntriesLoaded(data) {
     if (!isMainGenerationScope() || generationScope.worldInfoHandled) return;
     generationScope.worldInfoHandled = true;
+    captureStaticLoreSources(data);
     routeEntries([data?.globalLore, data?.characterLore, data?.chatLore, data?.personaLore]);
+}
+
+/** Source admission is separate from dynamic routing and never changes scan data.
+ * A constant entry with arbitrary template syntax is not a literal fixed rule.
+ */
+function staticLoreRecord(entry) {
+    if (!entry || typeof entry.world !== 'string' || !entry.world
+        || !['string', 'number'].includes(typeof entry.uid)) return null;
+    const content = String(entry.content ?? ''), depth = Number(entry.depth), keep = keepRegex();
+    const eligible = entry.constant === true && !entry.disable
+        && Number(entry.position) === POS.atDepth && Number(entry.role ?? ROLE_SYSTEM) === ROLE_SYSTEM
+        && Number.isInteger(depth) && depth > 0 && depth <= TOP_DEPTH
+        && !!content.trim() && !/\{\{|\}\}|<%|%>|\{\[|\bIZ[MW]7_|【本轮江湖介入】|<此刻运势>/i.test(content)
+        && !hasShujukuOwnership(entry) && !SHUJUKU_TEMPLATE.test(content) && !isDynamicEntry(entry)
+        && (!entry.useProbability || Number(entry.probability ?? 100) === 100)
+        && !entry.vectorized && !String(entry.group ?? '').trim() && !String(entry.automationId ?? '').trim()
+        && !entry.delayUntilRecursion && !(entry.characterFilter?.names?.length || entry.characterFilter?.tags?.length)
+        && !(Array.isArray(entry.triggers) && entry.triggers.length)
+        && !keep.test(String(entry.comment ?? entry.name ?? '')) && !keep.test(content.trimStart().split('\n', 1)[0]);
+    return { key: JSON.stringify([entry.world, entry.uid]), content, depth, eligible,
+        signature: JSON.stringify([content, entry.constant, entry.disable ?? false, Number(entry.position),
+            Number(entry.role ?? ROLE_SYSTEM), depth, entry.useProbability ?? false, entry.probability ?? 100,
+            entry.sticky ?? 0, entry.cooldown ?? 0, entry.delay ?? 0, entry.vectorized ?? false,
+            entry.group ?? '', entry.automationId ?? '', entry.triggers ?? [], entry.comment ?? entry.name ?? '',
+            entry.delayUntilRecursion ?? false, entry.characterFilter ?? null]) };
+}
+
+function captureStaticLoreSources(data) {
+    const records = new Map();
+    for (const list of [data?.globalLore, data?.characterLore, data?.chatLore, data?.personaLore]) {
+        if (!Array.isArray(list)) continue;
+        for (const entry of list) {
+            const record = staticLoreRecord(entry);
+            if (record) records.set(record.key, records.has(record.key) ? null : record);
+        }
+    }
+    generationScope.staticLoreSources = records;
+    generationScope.staticLoreActivated = [];
+    generationScope.staticLorePreset = presetLearningIdentity();
+}
+
+function onWorldInfoActivated(entries) {
+    if (!isMainGenerationScope() || !Array.isArray(entries) || !generationScope.staticLoreSources) return;
+    const seen = new Set(), activated = [];
+    for (const entry of entries) {
+        const current = staticLoreRecord(entry);
+        if (!current) continue;
+        const source = generationScope.staticLoreSources.get(current.key);
+        if (seen.has(current.key)) { generationScope.staticLoreActivated = []; return; }
+        seen.add(current.key);
+        if (source?.eligible && current.eligible && source.signature === current.signature) activated.push(source);
+    }
+    generationScope.staticLoreActivated = activated;
+}
+
+function uniqueLiteralOffset(haystack, needle) {
+    const at = haystack.indexOf(needle);
+    return at >= 0 && haystack.indexOf(needle, at + 1) < 0 ? at : -1;
+}
+
+/** Never cut across an open tag, XML comment or Markdown code fence. */
+function closedLoreBoundary(content, whole = content) {
+    let fence = null;
+    const outside = [];
+    for (const line of content.split('\n')) {
+        const mark = line.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/);
+        if (mark) {
+            if (!fence) fence = { char: mark[1][0], length: mark[1].length };
+            else if (mark[1][0] === fence.char && mark[1].length >= fence.length && !mark[2].trim()) fence = null;
+        } else if (!fence) outside.push(line);
+    }
+    if (fence) return false;
+    let value = outside.join('\n');
+    value = value.replace(/<!--[\s\S]*?-->/g, '');
+    if (value.includes('<!--') || value.includes('-->')) return false;
+    const stack = [], empty = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+    const htmlContainers = new Set(['div', 'span', 'p', 'pre', 'code', 'script', 'style', 'section', 'article', 'table', 'ul', 'ol', 'li', 'details', 'textarea']);
+    const closers = new Set([...whole.matchAll(/<\/([A-Za-z_\u3400-\u9fff][\w\u3400-\u9fff:.-]*)\s*>/g)].map(match => match[1].toLowerCase()));
+    for (const match of value.matchAll(/<(\/?)([A-Za-z_\u3400-\u9fff][\w\u3400-\u9fff:.-]*)(?:\s[^<>]*?)?\s*(\/?)>/g)) {
+        const tag = match[2].toLowerCase();
+        if (empty.has(tag) || match[3]) continue;
+        // Inline bare <name> values with no closer are common documentation
+        // placeholders inside an enclosing, balanced rule. Standalone tags,
+        // HTML containers and tags closed in the unknown tail remain structural.
+        if (!match[1] && !closers.has(tag) && !htmlContainers.has(tag) && match[0] === `<${match[2]}>`) {
+            const lineStart = value.lastIndexOf('\n', match.index - 1) + 1;
+            const nextLine = value.indexOf('\n', match.index + match[0].length);
+            const lineEnd = nextLine < 0 ? value.length : nextLine;
+            if (stack.length && value.slice(lineStart, lineEnd).trim() !== match[0]) continue;
+        }
+        if (match[1]) { if (stack.pop() !== tag) return false; }
+        else stack.push(tag);
+    }
+    return stack.length === 0;
+}
+
+/** Prove the leading literal part of the host's actual depth-WI assembly.
+ * A mixed or templated tail stays put; no macros or regex are executed again.
+ */
+function provenStaticLorePrefixes() {
+    const groups = new Map();
+    for (const record of generationScope.staticLoreActivated ?? []) {
+        const list = groups.get(record.depth) ?? [];
+        list.push(record); groups.set(record.depth, list);
+    }
+    const prefixes = [];
+    for (const [depth, records] of groups) {
+        const prompt = ctx().extensionPrompts?.[`customDepthWI_${depth}_${ROLE_SYSTEM}`];
+        if (!prompt || Number(prompt.depth) !== depth || Number(prompt.role) !== ROLE_SYSTEM
+            || Number(prompt.position) !== 1 || typeof prompt.value !== 'string' || !prompt.value) continue;
+        const value = prompt.value;
+        const spans = records.map(record => ({ record, start: uniqueLiteralOffset(value, record.content) }))
+            .filter(span => span.start >= 0 && (span.start === 0 || value[span.start - 1] === '\n')
+                && (span.start + span.record.content.length === value.length || value[span.start + span.record.content.length] === '\n'))
+            .sort((a, b) => a.start - b.start);
+        if (spans.some((span, index) => index > 0 && span.start < spans[index - 1].start + spans[index - 1].record.content.length)) continue;
+        let end = 0, count = 0;
+        for (const span of spans) {
+            if (span.start < end || !/^\n*$/.test(value.slice(end, span.start))) break;
+            end = span.start + span.record.content.length; count++;
+        }
+        if (count && closedLoreBoundary(value.slice(0, end), value)) prefixes.push({ assembly: value,
+            content: value.slice(0, end), entries: count });
+    }
+    return prefixes;
+}
+
+/** Limited relocation crosses authenticated history only. Unknown fixed rules
+ * are barriers, preserving the global order of all fixed/preset material.
+ */
+function hoistProvenStaticLore(chat) {
+    const result = { blocks: 0, entries: 0, chars: 0 };
+    const s = settings(), snapshot = currentProcessedHistory();
+    if (!s.enabled || !s.hoistStatic || !s.preserveStructure || !isMainGenerationScope()
+        || !snapshot || generationScope.staticLorePreset !== presetLearningIdentity()) return result;
+    if (chat.some(message => !message || typeof message.content !== 'string'
+        || !['system', 'user', 'assistant'].includes(message.role))) return result;
+    const aligned = alignHistorySequence(chat, snapshot.entries, snapshot.requiredRoles, true);
+    if (!aligned) return result;
+    const historical = new Set(aligned.positions.map(position => chat[position]));
+    const candidates = provenStaticLorePrefixes().filter(prefix => {
+        let count = 0, prefixCount = 0;
+        for (const message of chat) {
+            const at = uniqueLiteralOffset(message.content, prefix.assembly);
+            if (at >= 0) count++;
+            else if (message.content.includes(prefix.assembly)) return false;
+            const prefixAt = uniqueLiteralOffset(message.content, prefix.content);
+            if (prefixAt >= 0) prefixCount++;
+            else if (message.content.includes(prefix.content)) return false;
+        }
+        return count === 1 && prefixCount === 1;
+    });
+    const anchor = chat[aligned.start], moved = [];
+    // Stop at any unknown material, including the unproven tail of a mixed block.
+    for (let i = aligned.start; i <= aligned.end; i++) {
+        const message = chat[i];
+        if (historical.has(message)) continue;
+        if (message.role !== 'system' || Object.keys(message).some(key => !['role', 'content'].includes(key))) break;
+        const matches = candidates.filter(prefix => message.content.startsWith(prefix.assembly));
+        if (matches.length !== 1) break;
+        const prefix = matches[0], tail = message.content.slice(prefix.content.length);
+        if (!tail && chat[i - 1]?.role === chat[i + 1]?.role && ['user', 'assistant'].includes(chat[i - 1]?.role)) break;
+        const fixed = tail ? { role: 'system', content: prefix.content } : message;
+        Object.defineProperty(fixed, '__cacheoptStaticLore', { value: true, enumerable: false });
+        moved.push(fixed); result.blocks++; result.entries += prefix.entries; result.chars += prefix.content.length;
+        if (tail) { chat[i] = { role: 'system', content: tail }; break; }
+        chat.splice(i--, 1); aligned.end--;
+    }
+    if (moved.length) chat.splice(chat.indexOf(anchor), 0, ...moved);
+    return result;
 }
 
 async function loadNativePromptManager() {
@@ -299,8 +475,8 @@ function routeEntries(lists) {
     const afterSlotOk = presetSlotBeforeHistory('worldInfoAfter');
     const stickyTurns = Math.max(0, Math.floor(Number(s.stickyTurns) || 0));
     const stickyOn = s.stickyLore && !systemBlocksGetMerged();
-    const toTop = (e, order) => {
-        Object.assign(e, { position: POS.atDepth, depth: TOP_DEPTH, role: ROLE_SYSTEM, order });
+    const toTop = e => {
+        Object.assign(e, { position: POS.atDepth, depth: TOP_DEPTH, role: ROLE_SYSTEM });
     };
 
     for (const list of lists) {
@@ -324,8 +500,8 @@ function routeEntries(lists) {
                     });
                 } else if (!e.constant || isDynamicEntry(e)) {
                     Object.assign(e, { position: POS.atDepth, depth: 0, role: ROLE_SYSTEM });
-                } else if (pos === POS.before ? !beforeSlotOk : !afterSlotOk) {
-                    toTop(e, (pos === POS.after ? 50000 : 0) + (Number(e.order) || 0));
+                } else if (!s.preserveStructure && (pos === POS.before ? !beforeSlotOk : !afterSlotOk)) {
+                    toTop(e);
                 }
             } else if (pos === POS.atDepth && (!e.constant || isDynamicEntry(e))) {
                 // 会变的深度条目统一放到深度 0：深度设得比聊天记录还大时它会落进系统提示，
@@ -333,14 +509,14 @@ function routeEntries(lists) {
                 if (Number(e.depth) !== 0) {
                     e.depth = 0;
                 }
-            } else if (s.hoistStatic && e.constant && !isDynamicEntry(e)
+            } else if (!s.preserveStructure && s.hoistStatic && e.constant && !isDynamicEntry(e)
                 && pos === POS.atDepth && Number(e.role ?? ROLE_SYSTEM) === ROLE_SYSTEM) {
-                // 固定规则前移到聊天记录之前；按原深度从深到浅、再按 order 排，保持原先的相对顺序
+                // 显式关闭结构保护时允许前移；扫描预算优先级 order 保持原值。
                 // before 槽固定使用 system；保留 user/assistant 深度条目及角色由作者注释控制的 AN 条目。
-                const depth = Number(e.depth) || 0;
-                const order = HOIST_ORDER_BASE + (100 - Math.min(depth, 99)) * 1000 + (Number(e.order) || 0);
-                if (beforeSlotOk) Object.assign(e, { position: POS.before, order });
-                else toTop(e, order);
+                // order also controls host activation/budget priority. Never change
+                // it during the scan, even when explicitly opting into relocation.
+                if (beforeSlotOk) e.position = POS.before;
+                else toTop(e);
             }
         }
     }
@@ -356,6 +532,7 @@ function headOf(message) {
 
 /** 插在聊天记录最顶端、要留在前面的块（固定设定 / 近期剧情设定） */
 function isTopBlock(message) {
+    if (message.__cacheoptStaticLore) return true;
     const t = text(message).trimStart();
     if (t.startsWith(STATIC_OPEN) || t.startsWith(STICKY_OPEN)) return true;
     // ST exposes the activated, assembled top-depth lore as an extension prompt.
@@ -369,11 +546,38 @@ function isVolatileHead(head) {
     return settings().volatileHeads.some(h => h && head.startsWith(h)) || learnedHeadsForScope().includes(head);
 }
 
+function isProtectedMessage(message) {
+    const firstLine = text(message).trimStart().split('\n', 1)[0];
+    return !!firstLine && keepRegex().test(firstLine);
+}
+
+function isMovableDynamic(message) {
+    const t = text(message).trimStart();
+    // Complete known database wrappers take precedence over generic keep patterns.
+    if (message.__cacheoptDynamic || t.startsWith(WRAP_OPEN) && t.trimEnd().endsWith(WRAP_CLOSE)
+        && t.split(WRAP_OPEN).length === 2 && t.split(WRAP_CLOSE).length === 2) return true;
+    if (isProtectedMessage(message)) return false;
+    // Worldbook template syntax alone does not establish final-message origin:
+    // a fixed preset can document a random macro literally as an example.
+    return isVolatileHead(headOf(message)) && t.length <= MAX_LEARN_CHARS;
+}
+
+function presetLearningIdentity() {
+    const cc = ctx().chatCompletionSettings ?? {};
+    // Hash source templates and order, never rendered turn variables. Learning
+    // from one preset must not authorize moving a same-titled rule in another.
+    const source = JSON.stringify([cc.preset_settings_openai ?? '', cc.names_behavior ?? 0,
+        cc.prompt_order ?? [], cc.prompts ?? []]);
+    let hash = 2166136261;
+    for (let i = 0; i < source.length; i++) hash = Math.imul(hash ^ source.charCodeAt(i), 16777619);
+    return `${source.length}:${(hash >>> 0).toString(16)}`;
+}
+
 function learningScopeKey() {
     const c = ctx();
     const owner = c.groupId ? ['group', String(c.groupId)]
         : ['character', String(c.characters?.[c.characterId]?.avatar ?? c.characterId ?? '')];
-    return JSON.stringify([...owner, String(c.getCurrentChatId() ?? '')]);
+    return JSON.stringify([...owner, String(c.getCurrentChatId() ?? ''), presetLearningIdentity()]);
 }
 
 function learnedHeadsForScope() {
@@ -492,16 +696,20 @@ function captureProcessedHistory(manager, chat, dryRun = false) {
         if (!prepared) return;
         source.pending = false;
         processedHistorySnapshot = { chatId: source.chatId, entries: selected, requiredRoles };
-        // Only a complete official core can carry identity across later in-place
-        // template edits. A helper's shorter budget must not shorten main history.
-        const identityCandidate = located.sourceStart === 0 && prepared.sourceStart === 0
-            && source.identityGroups.length < 8;
+        // The native budget may retain only an official suffix. Authenticate the
+        // complete retained sequence, including its offset in the official core;
+        // never infer identity for a partially matched prepared sequence.
+        const identityCandidate = prepared.sourceStart === 0 && source.identityGroups.length < 8;
         if (identityCandidate) {
-            const group = { count: source.entries.length };
+            const group = { count: selected.length, sourceStart: located.sourceStart };
             source.identityGroups.push(group);
-            prepared.positions.forEach((position, index) => source.identityWitnesses.set(chat[position], {
-                group, index, role: source.entries[index].role,
-            }));
+            prepared.positions.forEach((position, index) => {
+                const message = chat[position], witnesses = source.identityWitnesses.get(message) ?? [];
+                // A later helper can share these objects while using less history.
+                // Keep earlier proofs so its suffix cannot revoke the main range.
+                witnesses.push({ group, index, role: selected[index].role });
+                source.identityWitnesses.set(message, witnesses);
+            });
         }
         noteGenerationEvent('processed-confirmed', { entries: selected.length, identityCandidate });
     } catch { /* Unrecognized host collection shapes are not guessed. */ }
@@ -602,14 +810,13 @@ function reorder(chat) {
     // 聊天记录中间插入的 system 块：每多一轮位置就后移，会改写上一轮的前缀
     for (let i = end - 1; i > start; i--) {
         // 插在聊天记录最顶端的固定设定块就是要留在前面的
-        if (chat[i].role === 'system' && !isTopBlock(chat[i])) moved.unshift(...chat.splice(i, 1));
+        if (chat[i].role === 'system' && !isTopBlock(chat[i])
+            && (isMovableDynamic(chat[i]) || !settings().preserveStructure && !isProtectedMessage(chat[i]))) moved.unshift(...chat.splice(i, 1));
     }
     // 聊天记录之前的易变块（柏宝书历史摘要、学到的易变块、现场调整出来的动态世界书块）
     for (let i = start - 1; i >= 0; i--) {
-        const t = text(chat[i]).trimStart();
         if (chat[i].role === 'system' && !isTopBlock(chat[i])
-            && (chat[i].__cacheoptDynamic
-                || (isVolatileHead(headOf(chat[i])) && t.length <= MAX_LEARN_CHARS) || t.startsWith(WRAP_OPEN))) moved.unshift(...chat.splice(i, 1));
+            && isMovableDynamic(chat[i])) moved.unshift(...chat.splice(i, 1));
     }
     if (!moved.length) return 0;
 
@@ -625,8 +832,9 @@ function splitKnownDynamicBlocks(chat) {
     if (!range) return;
     for (let i = range.end - 1; i >= 0; i--) {
         const message = chat[i];
-        if (message.role !== 'system' || typeof message.content !== 'string' || isTopBlock(message)) continue;
-        const patterns = [];
+        if (message.role !== 'system' || typeof message.content !== 'string' || isTopBlock(message)
+            || Object.keys(message).some(key => !['role', 'content'].includes(key))) continue;
+        const patterns = [RUNTIME_SYSTEM_RECORDS.source];
         if (settings().compatIzumi) patterns.push(IZUMI_MEMORY.source);
         if (settings().compatShujuku) {
             for (const tag of ['最新数据与记录', '过往记忆', '剧情大纲编码索引']) {
@@ -657,7 +865,7 @@ function splitKnownDynamicBlocks(chat) {
     }
 }
 
-/** 聊天记录之前的固定区域里，同一开头的块内容变了 → 记为易变，下一轮起挪到聊天记录之后 */
+/** 历史末尾之前，同一唯一标题的 system 块两次改变才学习；保护规则和顶端块除外。 */
 function learnFrom(chat) {
     const s = settings();
     if (!s.learn) return [];
@@ -666,9 +874,10 @@ function learnFrom(chat) {
     if (lastSystemBlocks?.scopeKey !== scopeKey) changeCounts.clear();
     const range = findHistoryRange(chat);
     const firstTurn = chat.findIndex(m => m.role !== 'system');
-    const stop = range ? range.start : (firstTurn < 0 ? chat.length : firstTurn);
+    const stop = range ? range.end : (firstTurn < 0 ? chat.length : firstTurn);
     // 顶端设定块随场景变化是预期内的，不能学成易变块挪走
-    const blocks = chat.slice(0, stop).filter(m => m.role === 'system' && !isTopBlock(m)).map(m => ({ head: headOf(m), body: text(m) }));
+    const blocks = chat.slice(0, stop).filter(m => m.role === 'system' && !isTopBlock(m)
+        && !isProtectedMessage(m)).map(m => ({ head: headOf(m), body: text(m) }));
     const learned = [];
     if (lastSystemBlocks && lastSystemBlocks.scopeKey === scopeKey) {
         // A head is only an identifier when it occurs once on both sides.
@@ -746,19 +955,34 @@ function reportHistorySkip(reason) {
 function identityFinalHistory(chat, source) {
     const candidates = source.identityGroups.map(group => ({ group, positions: new Map(), valid: true }));
     const byGroup = new Map(candidates.map(candidate => [candidate.group, candidate]));
+    const observed = [];
     for (let position = 0; position < chat.length; position++) {
-        const message = chat[position], witness = source.identityWitnesses.get(message);
-        const candidate = witness && byGroup.get(witness.group);
-        if (!candidate) continue;
-        if (message.role !== witness.role || typeof message.content !== 'string' || !message.content.trim()
-            || candidate.positions.has(witness.index)) candidate.valid = false;
-        candidate.positions.set(witness.index, position);
+        const message = chat[position], witnesses = source.identityWitnesses.get(message) ?? [];
+        for (const witness of witnesses) {
+            const candidate = byGroup.get(witness.group);
+            if (!candidate) continue;
+            observed.push({ index: witness.group.sourceStart + witness.index, position });
+            if (message.role !== witness.role || typeof message.content !== 'string' || !message.content.trim()
+                || candidate.positions.has(witness.index)) candidate.valid = false;
+            candidate.positions.set(witness.index, position);
+        }
     }
     const valid = candidates.filter(candidate => candidate.valid && candidate.positions.size === candidate.group.count)
-        .map(candidate => Array.from({ length: candidate.group.count }, (_, index) => candidate.positions.get(index)))
-        .filter(positions => positions.every((position, index) => position !== undefined && (index === 0 || position > positions[index - 1])));
-    if (valid.length !== 1) return null;
-    const positions = valid[0], entries = positions.map(position => ({ role: chat[position].role, content: chat[position].content }));
+        .map(candidate => ({ sourceStart: candidate.group.sourceStart,
+            positions: Array.from({ length: candidate.group.count }, (_, index) => candidate.positions.get(index)) }))
+        .filter(candidate => candidate.positions.every((position, index, positions) => position !== undefined && (index === 0 || position > positions[index - 1])))
+        .sort((a, b) => a.sourceStart - b.sourceStart);
+    if (!valid.length) return null;
+    // Shared-object suffix proofs are compatible with a complete main proof.
+    // Independent histories in the same final request remain ambiguous.
+    const chosen = valid[0], positions = chosen.positions;
+    if (valid.some(candidate => candidate.positions.some((position, index) =>
+        positions[candidate.sourceStart - chosen.sourceStart + index] !== position))) return null;
+    // A surviving older witness cannot silently become a fixed pre-history block
+    // merely because another proof authenticated a shorter budgeted suffix.
+    if (observed.some(witness => witness.index < chosen.sourceStart
+        || positions[witness.index - chosen.sourceStart] !== witness.position)) return null;
+    const entries = positions.map(position => ({ role: chat[position].role, content: chat[position].content }));
     // New quoted messages are not given identity. They also cannot create a
     // second text alignment that would enlarge the authenticated range later.
     const aligned = alignHistorySequence(chat, entries, undefined, true);
@@ -814,7 +1038,11 @@ function onSettingsReady(data) {
     splitKnownDynamicBlocks(data.messages);
     const learned = learnFrom(data.messages);
     const n = reorder(data.messages);
+    const unsupported = ['tools', 'functions'].some(key => data[key] != null && (!Array.isArray(data[key]) || data[key].length))
+        || ['tool_choice', 'function_call', 'response_format', 'json_schema'].some(key => data[key] != null);
+    const fixed = unsupported ? { blocks: 0, entries: 0, chars: 0 } : hoistProvenStaticLore(data.messages);
     lastRun = `${new Date().toLocaleTimeString()} 最终请求重排：移动了 ${n} 个块`
+        + (fixed.blocks ? `；常驻世界书前移 ${fixed.entries} 条（${fixed.chars} 字，保留 system 角色）` : '')
         + (learned.length ? `；新学到易变块 ${learned.length} 个` : '');
     $('#cacheopt_last').text(lastRun);
     renderLearned();
@@ -860,11 +1088,10 @@ let latestRealAttempt = null;
  * Rules merely mentioning fortune or a current turn are not runtime provenance.
  */
 function splitRuntimeSystemRecords(messages) {
-    const runtime = /^【本轮江湖介入】启用后第\d+轮；实际玩家回合序号\d+，玩家楼层\d+。[^\n]*同轮续写不新开第二个事件。(?=\n|$)|^<此刻运势>[^\S\n]*\d{1,3}[^\S\n]*<\/此刻运势>[^\S\n]*\n同一回合各项不同行动共用此值。[^\n]*不在正文展示运势。(?=\n|$)/gm;
     let converted = 0;
     const result = messages.flatMap(message => {
         if (message.role !== 'system') return [message];
-        const matches = [...message.content.matchAll(runtime)];
+        const matches = [...message.content.matchAll(RUNTIME_SYSTEM_RECORDS)];
         if (!matches.length) return [message];
         const pieces = [];
         let at = 0;
@@ -1306,19 +1533,21 @@ function renderSettings() {
     <div class="cacheopt-settings">
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <b>⚡ Vertex 缓存优化 2.6.5</b>
+          <b>⚡ Vertex 缓存优化 2.6.7</b>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
           <div class="cacheopt-hint">仅用于酒馆的 Vertex AI 渠道；其他渠道不整理请求、不记录统计，数据库辅助模型保持原调用。</div>
           <div class="cacheopt-hint">需要支持正式 generate_interceptor 历史钩子及带生成类型的最终设置事件。未确认宿主来源时跳过整理，不猜测历史。</div>
           <label class="checkbox_label"><input id="cacheopt_enabled" type="checkbox"> 启用 Vertex 缓存优化</label>
+          <label class="checkbox_label"><input id="cacheopt_preserve" type="checkbox"> 保留预设结构（推荐）：保护示范对话、尾部规则和未知来源块的顺序与角色</label>
           <label class="checkbox_label"><input id="cacheopt_route" type="checkbox"> 世界书现场调整：关键词 / 会变的条目移到聊天中（不改文件）</label>
-          <label class="checkbox_label"><input id="cacheopt_hoist" type="checkbox"> 固定规则条目前移进系统提示</label>
+          <label class="checkbox_label"><input id="cacheopt_hoist" type="checkbox"> 常驻世界书智能前移：仅本轮已激活、无模板的字面设定，保留 system 角色</label>
+          <div class="cacheopt-hint">结构保护开启时仅跨越已确认的真实历史；混合块中未知尾部、深度 0、数据库、格式规则和模板保持原位。合格条目的深度位置会提前，不改世界书文件或激活预算。</div>
           <label class="checkbox_label"><input id="cacheopt_shujuku" type="checkbox"> 数据库召回兼容：纪要、索引、表头和包裹移到当前历史之后</label>
           <label class="checkbox_label"><input id="cacheopt_izumi" type="checkbox"> 泉记忆功能兼容（仅使用该功能时开启）</label>
           <label class="checkbox_label"><input id="cacheopt_gemini_proxy" type="checkbox"> Vertex 固定头强化（实验）：固定规则集中到开头，动态资料留在后部</label>
-          <div class="cacheopt-hint">仅用于 Vertex 的 Gemini 正文请求。会合并固定 system 并调整规则顺序，原位留下固定 user 标记，将后部 system 资料原位转为 user；可能影响预设服从程度。默认关闭，实际收益以 API 缓存 token 为准。</div>
+          <div class="cacheopt-hint">固定头强化独立于结构保护：开启后仍会合并固定 system 并调整规则顺序，原位留下固定 user 标记，将后部 system 资料原位转为 user。默认关闭，实际收益以 API 缓存 token 为准。</div>
           <label class="checkbox_label"><input id="cacheopt_sticky" type="checkbox" disabled> 关键词前置保持（Vertex 渠道不适用，自动停用）
             <input id="cacheopt_sticky_turns" class="text_pole cacheopt-num" type="number" min="1" max="50" disabled> 条消息</label>
           <label class="checkbox_label"><input id="cacheopt_learn" type="checkbox"> 自动学习系统提示里的易变块</label>
@@ -1340,6 +1569,7 @@ function renderSettings() {
     </div>`;
     $('#extensions_settings2').append(html);
     $('#cacheopt_enabled').prop('checked', settings().enabled).on('input', function () { setEnabled(!!$(this).prop('checked')); });
+    bindCheckbox('#cacheopt_preserve', 'preserveStructure');
     bindCheckbox('#cacheopt_route', 'routeWorldInfo');
     bindCheckbox('#cacheopt_hoist', 'hoistStatic');
     bindCheckbox('#cacheopt_shujuku', 'compatShujuku');
@@ -1381,6 +1611,7 @@ jQuery(() => {
     watchRealRequests();
     const c = ctx();
     c.eventSource.on(c.eventTypes.WORLDINFO_ENTRIES_LOADED, onWorldInfoEntriesLoaded);
+    if (c.eventTypes.WORLD_INFO_ACTIVATED) c.eventSource.on(c.eventTypes.WORLD_INFO_ACTIVATED, onWorldInfoActivated);
     if (c.eventTypes.GENERATION_STARTED) c.eventSource.on(c.eventTypes.GENERATION_STARTED, onGenerationStarted);
     if (c.eventTypes.GENERATION_ENDED) c.eventSource.on(c.eventTypes.GENERATION_ENDED, onGenerationEnded);
     if (c.eventTypes.GENERATION_STOPPED) c.eventSource.on(c.eventTypes.GENERATION_STOPPED, onGenerationStopped);
